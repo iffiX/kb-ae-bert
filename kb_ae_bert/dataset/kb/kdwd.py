@@ -1,14 +1,27 @@
 import os
 from docker.types import Mount
-from ..utils.kaggle import download_dataset
-from ..utils.docker import create_or_reuse_docker, allocate_port
-from ..utils.mongo import load_dataset_files, connect_to_database
+from kb_ae_bert.utils.settings import (
+    dataset_cache_dir,
+    mongo_docker_name as default_mdn,
+)
+from kb_ae_bert.utils.kaggle import download_dataset
+from kb_ae_bert.utils.docker import create_or_reuse_docker, allocate_port
+from kb_ae_bert.utils.mongo import load_dataset_files, connect_to_database
 
 
 class KDWDDataset:
-    def __init__(self, local_root_path: str, mongo_docker_name: str = None):
+    def __init__(
+        self,
+        local_root_path: str = None,
+        mongo_docker_name: str = None,
+        force_reload: bool = False,
+    ):
+        local_root_path = local_root_path or str(
+            os.path.join(dataset_cache_dir, "kaggle")
+        )
+        mongo_docker_name = mongo_docker_name or default_mdn
         self.db_port = allocate_port()
-        self.db_docker = create_or_reuse_docker(
+        self.db_docker, is_reused = create_or_reuse_docker(
             image="mongo:latest",
             startup_args={
                 "ports": {"27017": self.db_port},
@@ -26,7 +39,7 @@ class KDWDDataset:
         download_dataset(
             "kenshoresearch/kensho-derived-wikimedia-data", local_root_path
         )
-        if mongo_docker_name is None:
+        if not is_reused or force_reload:
             # load dataset into the database
             load_dataset_files(
                 self.db_docker,

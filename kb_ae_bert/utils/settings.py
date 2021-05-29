@@ -1,6 +1,9 @@
 import os
 from typing import Union
 
+# settings.py is for global configs that do not differentiate
+# between different trainings.
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 http_proxy = None  # type: Union[str, None]
 kaggle_username = ""  # type: str
@@ -11,6 +14,10 @@ model_cache_dir = str(
 dataset_cache_dir = str(
     os.path.abspath(os.path.join(ROOT, os.pardir, "data", "dataset"))
 )  # type: str
+preprocess_cache_dir = str(
+    os.path.abspath(os.path.join(ROOT, os.pardir, "data", "preprocess"))
+)  # type: str
+mongo_docker_name = "mongodb2"
 
 
 def reset():

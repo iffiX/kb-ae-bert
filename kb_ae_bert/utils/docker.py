@@ -1,5 +1,6 @@
 import docker
 import socket
+from docker.errors import NotFound
 from docker.models.containers import Container
 from typing import Dict, Any
 from contextlib import closing
@@ -7,15 +8,17 @@ from contextlib import closing
 
 def create_or_reuse_docker(
     image: str, startup_args: Dict[str, Any] = None, reuse_name: str = None
-) -> Container:
+) -> (Container, bool):
     client = docker.from_env()
     startup_args = startup_args or {}
-    if reuse_name is not None:
-        container = client.containers.create(image=image, **startup_args)
-    else:
+    is_reused = True
+    try:
         container = client.containers.get(reuse_name)
+    except NotFound:
+        container = client.containers.create(image=image, **startup_args)
+        is_reused = False
     container.start()
-    return container
+    return container, is_reused
 
 
 def safe_exec_on_docker(container: Container, command: str):

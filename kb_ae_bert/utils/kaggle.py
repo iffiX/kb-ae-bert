@@ -5,7 +5,7 @@ import zipfile
 
 def download_dataset(dataset: str, local_root_path: str):
     """
-    Download and extract kaggle dataset.
+    Download (if not cached in `local_root_path`) and extract kaggle dataset.
 
     Args:
         dataset: the string identified of the dataset

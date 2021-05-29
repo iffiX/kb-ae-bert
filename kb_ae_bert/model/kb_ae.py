@@ -30,6 +30,7 @@ class KBMaskedLMEncoder(nn.Module):
             mlp_hidden_size: Size of hidden layers, default is not using hidden layers
             **base_configs: Additional configs passed to AutoModel.
         """
+        super().__init__()
         self.base = AutoModelForMaskedLM.from_pretrained(
             base_type,
             cache_dir=model_cache_dir,
@@ -55,7 +56,6 @@ class KBMaskedLMEncoder(nn.Module):
             raise ValueError(f"Unknown relation_mode {relation_mode}")
 
         self.relation_mode = relation_mode
-        super().__init__()
 
     @property
     def hidden_size(self):
@@ -125,6 +125,7 @@ class KBEntityDetector(nn.Module):
             base_type: Base type of model used to initialize the AutoModel.
             **base_configs: Additional configs passed to AutoModel.
         """
+        super().__init__()
         self.base = AutoModelForTokenClassification.from_pretrained(
             base_type,
             cache_dir=model_cache_dir,
@@ -133,7 +134,6 @@ class KBEntityDetector(nn.Module):
             num_labels=2,
             **base_configs,
         )
-        super().__init__()
 
     def forward(self, tokens, proposal_labels=None):
         """

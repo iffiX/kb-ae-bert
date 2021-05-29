@@ -10,8 +10,8 @@ class ExtendVocabForQA(nn.Module):
     def __init__(
         self,
         base_type: str = "bert-base-uncased",
-        extend_config: Dict[str, Any] = None,
         extend_mode: str = "ratio_mix",
+        extend_config: Dict[str, Any] = None,
         **base_configs,
     ):
         """
@@ -26,6 +26,7 @@ class ExtendVocabForQA(nn.Module):
                 "replace" for replacing each sub token embedding with the new embedding.
             **base_configs: Additional configs passed to AutoModel.
         """
+        super().__init__()
         self.base = AutoModelForQuestionAnswering.from_pretrained(
             base_type,
             cache_dir=model_cache_dir,
@@ -41,7 +42,6 @@ class ExtendVocabForQA(nn.Module):
             raise ValueError(f"Unknown extend_mode {extend_mode}")
         self.extend_mode = extend_mode
         self.extend_config = extend_config
-        super().__init__()
 
     def forward(
         self,
@@ -60,10 +60,12 @@ class ExtendVocabForQA(nn.Module):
                 LongTensor of shape (batch_size, sequence_length)
             extend_embeds: Extended embedding, FloatTensor of shape
                 (batch_size, sequence_length, hidden_size)
-            start_positions: A value in 0, 1 indicating whether current position is
-                a start position of the answer, LongTensor of shape (batch_size,)
-            end_positions: A value in 0, 1 indicating whether current position is
-                an end position of the answer, LongTensor of shape (batch_size,)
+            start_positions: A value in [0, sequence_length) indicating which
+                index is the start position of the answer, LongTensor of shape
+                (batch_size,)
+            end_positions: A value in [0, sequence_length) indicating which
+                index is the end position of the answer, LongTensor of shape
+                (batch_size,)
 
         Returns:
             loss: CrossEntropyLoss of predicted start/ends and given start/ends. None
