@@ -1,7 +1,7 @@
 from typing import Dict, Any
 from urllib.parse import urlparse
 from transformers import AutoModelForQuestionAnswering
-from ..utils.settings import model_cache_dir, http_proxy
+from ..utils.settings import model_cache_dir, proxies
 import torch as t
 import torch.nn as nn
 
@@ -30,36 +30,45 @@ class ExtendVocabForQA(nn.Module):
         self.base = AutoModelForQuestionAnswering.from_pretrained(
             base_type,
             cache_dir=model_cache_dir,
-            proxies={"http": urlparse(http_proxy).path},
+            proxies=proxies,
             return_dict=True,
             **base_configs,
         )
+        if "bert" not in base_type:
+            raise ValueError(f"Unknown base type {base_type}")
         if extend_mode == "ratio_mix_learnable":
             self.mix_weight = nn.Parameter(t.rand(self.base.config.hidden_size))
         elif extend_mode in ("ratio_mix", "replace"):
             pass
         else:
             raise ValueError(f"Unknown extend_mode {extend_mode}")
+        self.base_type = base_type
         self.extend_mode = extend_mode
         self.extend_config = extend_config
 
     def forward(
         self,
-        token_embeds,
+        token_ids,
         extend_tokens,
         extend_embeds,
+        attention_mask=None,
+        token_type_ids=None,
         start_positions=None,
         end_positions=None,
     ):
         """
         Args:
-            token_embeds: Token embeddings, Float Tensor of shape
-                (batch_size, sequence_length, hidden_size), set `return_tensors`
+            token_ids: Token ids, Long Tensor of shape
+                (batch_size, sequence_length,), set `return_tensors`
                 in your tokenizer to get this.
             extend_tokens: Extended tokens, 0 is not extended, 1 is extended,
                 LongTensor of shape (batch_size, sequence_length)
             extend_embeds: Extended embedding, FloatTensor of shape
                 (batch_size, sequence_length, hidden_size)
+            attention_mask: Attention mask, 0 or 1, FloatTensor of shape
+                (batch_size, sequence_length)
+            token_type_ids: Type id of tokens (segment embedding), 0 or 1,
+                LongTensor of shape (batch_size, sequence_length)
             start_positions: A value in [0, sequence_length) indicating which
                 index is the start position of the answer, LongTensor of shape
                 (batch_size,)
@@ -75,6 +84,8 @@ class ExtendVocabForQA(nn.Module):
             end_logits FloatTensor of shape (batch_size, sequence_length),
                 Span-end scores (before SoftMax).
         """
+        # get token embeddings
+        token_embeds = self.embeddings.word_embeddings(token_ids)
         if self.extend_mode == "ratio_mix":
             alpha = self.extend_config["alpha"]
             token_embeds = (
@@ -85,7 +96,7 @@ class ExtendVocabForQA(nn.Module):
             weight = self.mix_weight.view(1, 1, -1)
             token_embeds = (
                 token_embeds * weight
-                - +extend_tokens.unsqueeze(-1) * (1 - weight) * extend_embeds
+                + extend_tokens.unsqueeze(-1) * (1 - weight) * extend_embeds
             )
         elif self.extend_mode == "replace":
             token_embeds = t.where(
@@ -93,6 +104,8 @@ class ExtendVocabForQA(nn.Module):
             )
         out = self.base(
             input_embeds=token_embeds,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
             start_positions=start_positions,
             end_positions=end_positions,
         )

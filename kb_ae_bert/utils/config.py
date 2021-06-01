@@ -8,6 +8,7 @@ class KBEncoderTrainConfig(BaseModel):
     base_type: str = "bert-base-uncased"
     relation_mode: str = "concatenation"
     mlp_hidden_size: Tuple[int] = ()
+    context_length: int = 200
 
 
 class QATrainConfig(BaseModel):
@@ -15,17 +16,24 @@ class QATrainConfig(BaseModel):
     optimizer_class: str = "Adam"
     learning_rate: float = 5e-5
     l2_regularization: Optional[float]
+    context_length: int = 200
     batch_size: int = 256
+
     base_type: str = "bert-base-uncased"
     extend_config: Optional[Dict[str, Any]]
     extend_mode: str = "ratio_mix"
     base_configs: Dict[str, Any] = {}
+
     kb_encoder_trainable: bool = False
-    dataset_name: str = "nq"
+    # "squad", "squad_v2", "nq", etc.
+    train_dataset_path: Optional[str]
+    validate_dataset_path: Optional[str]
 
 
 class Config(BaseModel):
-    pipeline: List[str] = ["kb_encoder", "qa"]
+    # example: ["kb_encoder", "qa"]
+    # config in configs must match items in pipeline
+    pipeline: List[str]
     configs: List[Union[QATrainConfig, KBEncoderTrainConfig]]
 
 

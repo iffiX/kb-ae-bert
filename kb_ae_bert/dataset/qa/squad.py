@@ -1,14 +1,26 @@
 import logging
+import torch as t
 from .base import QADataset, TorchDataset
 from typing import List, Dict, Any
 from transformers import PreTrainedTokenizerBase, BatchEncoding
+from datasets import load_metric, DownloadConfig
+from kb_ae_bert.utils.settings import metrics_cache_dir, proxies
 
 
 class SQuADDataset(QADataset):
     def __init__(
-        self, tokenizer: PreTrainedTokenizerBase, local_root_path: str = None,
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        dataset_path: str = "squad",
+        local_root_path: str = None,
     ):
-        super().__init__("squad", local_root_path=local_root_path)
+        super().__init__(dataset_path, local_root_path=local_root_path)
+        # squad v2 works for squad and squad v2 and any custom squad datasets
+        self.metric = load_metric(
+            "squad_v2",
+            cache_dir=metrics_cache_dir,
+            download_config=DownloadConfig(proxies=proxies),
+        )
         self.tokenizer = tokenizer
         self._train = None
         self._validate = None
@@ -26,14 +38,49 @@ class SQuADDataset(QADataset):
             self._validate = self.preprocess(split="validate")
         return TorchDataset(self._validate)
 
+    def validate(self, batch, start_logits, end_logits):
+        if self._validate is None:
+            self._validate = self.preprocess(split="validate")
+        predictions = []
+        references = []
+        for index, input_ids, start_l, end_l in zip(
+            batch["sample-index"], batch["input_ids"], start_logits, end_logits
+        ):
+            sample = self._validate[index]
+            # get the most likely beginning of answer with the argmax of the score
+            answer_start = t.argmax(start_l)
+            answer_end = t.argmax(end_l) + 1
+            answer = self.tokenizer.convert_tokens_to_string(
+                self.tokenizer.convert_ids_to_tokens(input_ids[answer_start:answer_end])
+            )
+            for answer_ref in sample["answers"]["text"]:
+                predictions.append(
+                    {
+                        "prediction_text": answer,
+                        "id": sample["id"],
+                        "no_answer_probability": 0.0,
+                    }
+                )
+                references.append(
+                    {
+                        "prediction_text": answer_ref,
+                        "id": sample["id"],
+                        "no_answer_probability": 0.0,
+                    }
+                )
+
+        return self.metric.compute(predictions=predictions, references=references)
+
     def preprocess(self, split="train"):
         logging.info(f"SQuADDataset begin pre-processing split {split}")
         # flatten answers in the dataset
         contexts = []
         questions = []
         answers = []
-        for item in self.dataset[split]:
+        indexes = []
+        for idx, item in enumerate(self.dataset[split]):
             for answer in item["answers"]:
+                indexes.append(idx)
                 contexts.append(item["context"])
                 questions.append(item["question"])
                 answers.append(answer)
@@ -46,6 +93,10 @@ class SQuADDataset(QADataset):
 
         # update token start / end positions
         self.add_token_positions(encodings, self.tokenizer, answers)
+
+        # update index
+        encodings.update({"sample-index": indexes})
+
         logging.info(f"SQuADDataset finished pre-processing split {split}")
         return encodings
 

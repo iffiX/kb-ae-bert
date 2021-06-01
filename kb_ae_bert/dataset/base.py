@@ -12,3 +12,11 @@ class TorchDataset(Dataset):
 
     def __len__(self):
         return len(self.encodings.input_ids)
+
+
+class EmptyDataset(Dataset):
+    def __getitem__(self, idx: int):
+        return None
+
+    def __len__(self):
+        return 0

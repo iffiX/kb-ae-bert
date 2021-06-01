@@ -5,7 +5,11 @@ from typing import Union
 # between different trainings.
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-http_proxy = None  # type: Union[str, None]
+# in requests format
+proxies = {
+    "http": "socks5://localhost:1082",
+    "https": "socks5://localhost:1082",
+}  # type: Union[dict, None]
 kaggle_username = ""  # type: str
 kaggle_key = ""  # type: str
 model_cache_dir = str(
@@ -13,6 +17,9 @@ model_cache_dir = str(
 )  # type: str
 dataset_cache_dir = str(
     os.path.abspath(os.path.join(ROOT, os.pardir, "data", "dataset"))
+)  # type: str
+metrics_cache_dir = str(
+    os.path.abspath(os.path.join(ROOT, os.pardir, "data", "metrics"))
 )  # type: str
 preprocess_cache_dir = str(
     os.path.abspath(os.path.join(ROOT, os.pardir, "data", "preprocess"))
