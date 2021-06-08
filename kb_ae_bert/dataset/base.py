@@ -1,9 +1,10 @@
 import torch as t
-from torch.utils.data import Dataset
+from typing import Callable, Dict
+from torch.utils.data import Dataset, IterableDataset
 from transformers import BatchEncoding
 
 
-class TorchDataset(Dataset):
+class StaticMapDataset(Dataset):
     def __init__(self, encodings: BatchEncoding):
         self.encodings = encodings
 
@@ -12,6 +13,17 @@ class TorchDataset(Dataset):
 
     def __len__(self):
         return len(self.encodings.input_ids)
+
+
+class DynamicIterableDataset(IterableDataset):
+    def __init__(self, generator: Callable[[], Dict[str, t.Tensor]]):
+        self.generator = generator
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return self.generator()
 
 
 class EmptyDataset(Dataset):

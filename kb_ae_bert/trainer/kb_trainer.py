@@ -4,29 +4,22 @@ import pytorch_lightning as pl
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, BatchEncoding
 from ..model.kb_ae import KBMaskedLMEncoder
-from ..model.ext_vocab import ExtendVocabForQA
 from ..dataset.base import EmptyDataset
-from ..dataset.qa.squad import SQuADDataset
 from ..dataset.kb.kdwd import KDWDDataset
-from ..utils.config import Config, QATrainConfig, KBEncoderTrainConfig
+from ..utils.config import KBEncoderTrainConfig
 
 
-class QATrainer(pl.LightningModule):
-    def __init__(self, kb_encoder: KBMaskedLMEncoder, config: QATrainConfig):
-        """
-        Args:
-            config:
-        """
+class KBEncoderTrainer(pl.LightningModule):
+    def __init__(self, config: KBEncoderTrainConfig):
         super().__init__()
         np.random.seed(config.seed)
         t.random.manual_seed(config.seed)
         self.config = config
-
-        self.kb_encoder = kb_encoder
-        self.qa_model = ExtendVocabForQA(
+        self.kb_model = KBMaskedLMEncoder(
+            relation_size=config.relation_size,
             base_type=config.base_type,
-            extend_config=config.extend_config,
-            extend_mode=config.extend_mode,
+            relation_mode=config.relation_mode,
+            mlp_hidden_size=config.mlp_hidden_size,
             **config.base_configs,
         )
         self.qa_tokenizer = AutoTokenizer.from_pretrained(config.base_type)
@@ -137,8 +130,3 @@ class QATrainer(pl.LightningModule):
             lr=self.config.learning_rate,
             weight_decay=self.config.l2_regularization,
         )
-
-
-def train(config: Config):
-    # execute pipeline
-    pass

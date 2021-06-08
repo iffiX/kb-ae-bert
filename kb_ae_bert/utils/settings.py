@@ -10,6 +10,7 @@ proxies = {
     "http": "socks5://localhost:1082",
     "https": "socks5://localhost:1082",
 }  # type: Union[dict, None]
+kaggle_http_proxy = "http://localhost:3128"
 kaggle_username = ""  # type: str
 kaggle_key = ""  # type: str
 model_cache_dir = str(
@@ -31,5 +32,5 @@ def reset():
     # init kaggle
     os.environ["KAGGLE_USERNAME"] = kaggle_username
     os.environ["KAGGLE_KEY"] = kaggle_key
-    if http_proxy is not None:
-        os.environ["KAGGLE_PROXY"] = http_proxy
+    if kaggle_http_proxy is not None:
+        os.environ["KAGGLE_PROXY"] = kaggle_http_proxy

@@ -5,10 +5,17 @@ from typing import *
 
 class KBEncoderTrainConfig(BaseModel):
     seed: int = 0
+    optimizer_class: str = "Adam"
+    learning_rate: float = 5e-5
+    l2_regularization: Optional[float]
+    relation_size: int = 200
+    context_length: int = 200
+    batch_size: int = 256
+
     base_type: str = "bert-base-uncased"
+    base_configs: Dict[str, Any] = {}
     relation_mode: str = "concatenation"
     mlp_hidden_size: Tuple[int] = ()
-    context_length: int = 200
 
 
 class QATrainConfig(BaseModel):

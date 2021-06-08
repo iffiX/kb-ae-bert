@@ -1,10 +1,11 @@
+import os
 import logging
 import torch as t
-from .base import QADataset, TorchDataset
+from .base import QADataset, StaticMapDataset
 from typing import List, Dict, Any
 from transformers import PreTrainedTokenizerBase, BatchEncoding
-from datasets import load_metric, DownloadConfig
-from kb_ae_bert.utils.settings import metrics_cache_dir, proxies
+from datasets import load_dataset, load_metric, DownloadConfig
+from kb_ae_bert.utils.settings import dataset_cache_dir, metrics_cache_dir, proxies
 
 
 class SQuADDataset(QADataset):
@@ -14,7 +15,15 @@ class SQuADDataset(QADataset):
         dataset_path: str = "squad",
         local_root_path: str = None,
     ):
-        super().__init__(dataset_path, local_root_path=local_root_path)
+        local_root_path = local_root_path or str(
+            os.path.join(dataset_cache_dir, "huggingface")
+        )
+        self.dataset = load_dataset(
+            path=dataset_path,
+            cache_dir=local_root_path,
+            download_config=DownloadConfig(proxies=proxies),
+        )
+
         # squad v2 works for squad and squad v2 and any custom squad datasets
         self.metric = load_metric(
             "squad_v2",
@@ -26,17 +35,17 @@ class SQuADDataset(QADataset):
         self._validate = None
 
     @property
-    def train_dataset(self) -> TorchDataset:
+    def train_dataset(self):
         # lazy preprocess
         if self._train is None:
             self._train = self.preprocess(split="train")
-        return TorchDataset(self._train)
+        return StaticMapDataset(self._train)
 
     @property
-    def validate_dataset(self) -> TorchDataset:
+    def validate_dataset(self):
         if self._validate is None:
             self._validate = self.preprocess(split="validate")
-        return TorchDataset(self._validate)
+        return StaticMapDataset(self._validate)
 
     def validate(self, batch, start_logits, end_logits):
         if self._validate is None:
