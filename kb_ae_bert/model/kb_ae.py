@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import List
 from transformers import (
     AutoModelForMaskedLM,
     AutoModelForTokenClassification,
@@ -68,7 +68,7 @@ class KBMaskedLMEncoder(nn.Module):
         relation_size: int,
         base_type: str = "bert-base-uncased",
         relation_mode: str = "concatenation",
-        mlp_hidden_size: Tuple[int] = (),
+        mlp_hidden_size: List[int] = None,
         **base_configs,
     ):
         """
@@ -102,11 +102,12 @@ class KBMaskedLMEncoder(nn.Module):
         self._cls_id = tokenizer.cls_token_id
         self._sep_id = tokenizer.sep_token_id
         self._input_sequence_length = (
-            tokenizer.max_model_input_sizes.get(base_type, default=None) or 512
+            tokenizer.max_model_input_sizes.get(base_type, None) or 512
         )
 
         # relation head on [cls]
         mlp = []
+        mlp_hidden_size = mlp_hidden_size or []
         if relation_mode == "concatenation_mlp":
             input_size = self.base.config.hidden_size * 2
             for size in list(mlp_hidden_size) + [2 + relation_size]:

@@ -7,10 +7,10 @@ from typing import Union
 ROOT = os.path.dirname(os.path.abspath(__file__))
 # in requests format
 proxies = {
-    "http": "socks5://localhost:1082",
-    "https": "socks5://localhost:1082",
+    "http": "http://localhost:1090",
+    "https": "http://localhost:1090",
 }  # type: Union[dict, None]
-kaggle_http_proxy = "http://localhost:3128"
+kaggle_http_proxy = "http://localhost:1090"
 kaggle_username = ""  # type: str
 kaggle_key = ""  # type: str
 model_cache_dir = str(

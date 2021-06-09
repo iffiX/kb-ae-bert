@@ -35,7 +35,7 @@ class KBEncoderTrainConfig(BaseModel):
     base_type: str = "bert-base-uncased"
     base_configs: Dict[str, Any] = {}
     relation_mode: str = "concatenation"
-    mlp_hidden_size: Tuple[int] = ()
+    mlp_hidden_size: List[int] = []
 
     # "entity" or "relation"
     task: str = "entity"
@@ -87,7 +87,21 @@ class Config(BaseModel):
 
 def load_config(path: str):
     with open(path, "r") as f:
-        return Config(**json.load(f))
+        config_dict = json.load(f)
+        config = Config(
+            gpus=config_dict["gpus"],
+            early_stopping_patience=config_dict["early_stopping_patience"],
+            working_directory=config_dict["working_directory"],
+        )
+        for p, c in zip(config_dict["pipeline"], config_dict["configs"]):
+            config.pipeline.append(p)
+            if p == "kb_encoder":
+                config.configs.append(KBEncoderTrainConfig(**c))
+            elif p == "qa":
+                config.configs.append(QATrainConfig(**c))
+            else:
+                raise ValueError(f"Unknown stage {p}.")
+        return config
 
 
 def save_config(config: Config, path: str):

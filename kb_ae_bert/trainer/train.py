@@ -26,14 +26,14 @@ def train(config: Config):
         if stage not in ("kb_encoder", "qa"):
             raise ValueError(f"Unknown stage {stage}")
 
-        if stage == "kb_encoder" and isinstance(stage_config, KBEncoderTrainConfig):
+        if stage == "kb_encoder":
             if not stage_config.load:
                 stage_trainer = KBEncoderTrainer(stage_config)
             else:
                 stage_trainer = KBEncoderTrainer.load_from_checkpoint(
                     find_checkpoint(config, i)
                 )
-        elif stage == "qa" and isinstance(stage_config, QATrainConfig):
+        elif stage == "qa":
             if not stage_config.load:
                 kb_encoder = KBEncoderTrainer.load_from_checkpoint(
                     stage_config.kb_encoder_path
@@ -44,7 +44,7 @@ def train(config: Config):
                     find_checkpoint(config, i)
                 )
         else:
-            raise ValueError(f"Stage {stage} and config {stage_config} does not match.")
+            raise ValueError(f"Unknown stage {stage}.")
 
         # create directories, or reuse
         os.makedirs(checkpoint_path, exist_ok=True)

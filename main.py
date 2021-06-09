@@ -1,8 +1,10 @@
-import json
+import logging
 import argparse
 from pprint import pprint
 from kb_ae_bert.trainer.train import train
 from kb_ae_bert.utils.config import *
+
+logging.root.setLevel(logging.INFO)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -44,7 +46,7 @@ if __name__ == "__main__":
             if stage == "qa":
                 config.pipeline.append(stage)
                 config.configs.append(QATrainConfig())
-            elif stage == "kb_encode":
+            elif stage == "kb_encoder":
                 config.pipeline.append(stage)
                 config.configs.append(KBEncoderTrainConfig())
             else:
