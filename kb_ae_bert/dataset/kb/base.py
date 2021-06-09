@@ -46,9 +46,9 @@ class KnowledgeBaseDataset:
         """
         Args:
             batch: Sampled batch.
-            relation_logits: FloatTensor of shape (batch_size, 1 + relation_size),
-                first column is direction, remaining columns are relation scores
-                (before SoftMax).
+            relation_logits: FloatTensor of shape (batch_size, 2 + relation_size),
+                first two columns are direction, remaining columns are relation scores.
+                All values are inputs before SoftMax.
 
         Returns:
             A dictionary of various metrics that will be logged by the validating_step.
@@ -62,6 +62,7 @@ class KnowledgeBaseDataset:
     @property
     def validate_entity_encode_dataset(self):
         # Note: this validation is done by common MLM training objective,
+        # just input "labels" when using the MaskedLM models.
         # therefore there is no dedicate validate function
         raise NotImplementedError
 

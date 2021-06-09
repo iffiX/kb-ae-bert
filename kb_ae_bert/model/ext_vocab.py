@@ -1,5 +1,4 @@
 from typing import Dict, Any
-from urllib.parse import urlparse
 from transformers import AutoModelForQuestionAnswering
 from ..utils.settings import model_cache_dir, proxies
 import torch as t

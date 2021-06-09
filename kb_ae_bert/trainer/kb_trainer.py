@@ -4,7 +4,7 @@ import pytorch_lightning as pl
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, BatchEncoding
 from ..model.kb_ae import KBMaskedLMEncoder
-from ..dataset.base import EmptyDataset
+from ..dataset.base import collate_function_dict_to_batch_encoding
 from ..dataset.kb.kdwd import KDWDDataset
 from ..utils.config import KBEncoderTrainConfig
 
@@ -22,104 +22,110 @@ class KBEncoderTrainer(pl.LightningModule):
             mlp_hidden_size=config.mlp_hidden_size,
             **config.base_configs,
         )
-        self.qa_tokenizer = AutoTokenizer.from_pretrained(config.base_type)
+        self.kb_tokenizer = AutoTokenizer.from_pretrained(config.base_type)
 
-        if config.train_dataset_path is None:
-            self.train_qa_dataset = None
-        elif "squad" in config.train_dataset_path:
-            self.train_qa_dataset = SQuADDataset(
-                dataset_path=config.train_dataset_path, tokenizer=self.qa_tokenizer
+        if config.dataset == "KDWD":
+            self.dataset = KDWDDataset(
+                relation_size=config.relation_size,
+                context_length=config.context_length,
+                sequence_length=self.kb_tokenizer.model_max_length,
+                tokenizer=self.kb_tokenizer,
+                **config.dataset_config.dict(),
             )
         else:
-            raise ValueError(
-                f"Unknown QATrainConfig.train_dataset_path: {config.train_dataset_path}"
-            )
+            raise ValueError(f"Unknown KBEncoderTrainConfig.dataset: {config.dataset}")
+        if config.task not in ("entity", "relation"):
+            raise ValueError(f"Unknown KBEncoderTrainConfig.task: {config.task}")
 
-        if config.validate_dataset_path is None:
-            self.validate_qa_dataset = None
-        elif "squad" in config.validate_dataset_path:
-            self.validate_qa_dataset = SQuADDataset(
-                dataset_path=config.validate_dataset_path, tokenizer=self.qa_tokenizer
-            )
+    @property
+    def monitor(self):
+        if self.config.task == "entity":
+            return "mlm_loss"
         else:
-            raise ValueError(
-                f"Unknown QATrainConfig.validate_dataset_path: "
-                f"{config.validate_dataset_path}"
-            )
+            if self.config.dataset == "KDWD":
+                return "total_loss"
+            else:
+                raise ValueError("Unknown dataset.")
 
     def train_dataloader(self):
-        if self.train_qa_dataset is not None:
+        if self.config.task == "entity":
             return DataLoader(
-                dataset=self.train_qa_dataset.train_dataset,
+                dataset=self.dataset.train_entity_encode_dataset,
                 batch_size=self.config.batch_size,
+                collate_fn=collate_function_dict_to_batch_encoding,
+                num_workers=self.config.load_worker_num,
             )
         else:
-            return DataLoader(dataset=EmptyDataset())
+            return DataLoader(
+                dataset=self.dataset.train_relation_encode_dataset,
+                batch_size=self.config.batch_size,
+                collate_fn=collate_function_dict_to_batch_encoding,
+                num_workers=self.config.load_worker_num,
+            )
 
     def validation_dataloader(self):
-        if self.validate_qa_dataset is not None:
+        if self.config.task == "entity":
             return DataLoader(
-                dataset=self.validate_qa_dataset.validate_dataset,
+                dataset=self.dataset.validate_entity_encode_dataset,
                 batch_size=self.config.batch_size,
+                collate_fn=collate_function_dict_to_batch_encoding,
+                num_workers=self.config.load_worker_num,
             )
         else:
-            return DataLoader(dataset=EmptyDataset())
+            return DataLoader(
+                dataset=self.dataset.validate_relation_encode_dataset,
+                batch_size=self.config.batch_size,
+                collate_fn=collate_function_dict_to_batch_encoding,
+                num_workers=self.config.load_worker_num,
+            )
 
     # noinspection PyTypeChecker
     def training_step(self, batch: BatchEncoding, batch_idx):
         batch.convert_to_tensors("pt")
-        if self.config.kb_encoder_trainable:
-            self.kb_encoder.train()
+        if self.config.task == "entity":
+            # Masked Language model training
+            out = self.kb_model(
+                token_ids=batch["input_ids"].to(self.device),
+                attention_mask=batch["attention_mask"].to(self.device),
+                token_type_ids=batch["token_type_ids"].to(self.device),
+                labels=batch["labels"].to(self.device),
+            )
+            return out.loss
         else:
-            self.kb_encoder.eval()
-        kb_embeds = self.kb_encoder.compute_sentence_embeds(
-            sentence_tokens=batch["input_ids"].to(self.device),
-            context_length=self.config.context_length,
-        )
-        extend_tokens = t.where(
-            batch["input_ids"]
-            != self.qa_tokenizer.cls_token_id & batch["input_ids"]
-            != self.qa_tokenizer.sep_token_id & batch["input_ids"]
-            != self.qa_tokenizer.pad_token_id,
-            1,
-            0,
-        )
-        out = self.qa_model(
-            token_ids=batch["input_ids"].to(self.device),
-            extend_embeds=kb_embeds,
-            extend_tokens=extend_tokens,
-            attention_mask=batch["attention_mask"].to(self.device),
-            token_type_ids=batch["token_type_ids"].to(self.device),
-            start_positions=batch["start_positions"].to(self.device),
-            end_positions=batch["end_positions"].to(self.device),
-        )
-        return out.loss
+            # Relation encoding training
+            # Make sure that your model is trained on MLM first
+            relation_logits = self.kb_model.compute_relation(
+                tokens1=batch["input_ids_1"].to(self.device),
+                tokens2=batch["input_ids_2"].to(self.device),
+                attention_mask=batch["attention_mask"].to(self.device),
+                token_type_ids=batch["token_type_ids"].to(self.device),
+            )
+            result = self.dataset.get_loss(batch, relation_logits)
+            return result[0] + result[1]
 
     # noinspection PyTypeChecker
     def validation_step(self, batch: BatchEncoding, _batch_idx):
         batch.convert_to_tensors("pt")
-        kb_embeds = self.kb_encoder.compute_sentence_embeds(
-            sentence_tokens=batch["input_ids"].to(self.device),
-            context_length=self.config.context_length,
-        )
-        extend_tokens = t.where(
-            batch["input_ids"]
-            != self.qa_tokenizer.cls_token_id & batch["input_ids"]
-            != self.qa_tokenizer.sep_token_id & batch["input_ids"]
-            != self.qa_tokenizer.pad_token_id,
-            1,
-            0,
-        )
-        out = self.qa_model(
-            token_ids=batch["input_ids"].to(self.device),
-            extend_embeds=kb_embeds,
-            extend_tokens=extend_tokens,
-            attention_mask=batch["attention_mask"].to(self.device),
-            token_type_ids=batch["token_type_ids"].to(self.device),
-            start_positions=batch["start_positions"].to(self.device),
-            end_positions=batch["end_positions"].to(self.device),
-        )
-        metrics = self.validate_qa_dataset.validate(batch, out[1], out[2])
+        if self.config.task == "entity":
+            # Masked Language model validation
+            out = self.kb_model(
+                token_ids=batch["input_ids"].to(self.device),
+                attention_mask=batch["attention_mask"].to(self.device),
+                token_type_ids=batch["token_type_ids"].to(self.device),
+                labels=batch["labels"].to(self.device),
+            )
+            metrics = {"mlm_loss": out.loss}
+        else:
+            # Relation encoding training
+            # Make sure that your model is trained on MLM first
+            relation_logits = self.kb_model.compute_relation(
+                tokens1=batch["input_ids_1"].to(self.device),
+                tokens2=batch["input_ids_2"].to(self.device),
+                attention_mask=batch["attention_mask"].to(self.device),
+                token_type_ids=batch["token_type_ids"].to(self.device),
+            )
+            metrics = self.dataset.validate_relation_encode_dataset(relation_logits)
+
         for key, value in metrics.items():
             self.log(key, value)
 

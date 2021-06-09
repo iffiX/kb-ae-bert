@@ -49,6 +49,16 @@ class QATrainer(pl.LightningModule):
                 f"{config.validate_dataset_path}"
             )
 
+    @property
+    def monitor(self):
+        if "squad" in self.config.train_dataset_path:
+            # See https://github.com/huggingface/datasets/blob/
+            # master/metrics/squad_v2/squad_v2.py
+            # "f1" or "exact for EM score
+            return "f1"
+        else:
+            return "f1"
+
     def train_dataloader(self):
         if self.train_qa_dataset is not None:
             return DataLoader(

@@ -10,7 +10,7 @@ import torch as t
 from docker.types import Mount
 from bson import ObjectId
 from pymongo import ASCENDING, DESCENDING
-from transformers import PreTrainedTokenizerBase, BatchEncoding
+from transformers import PreTrainedTokenizerBase
 from kb_ae_bert.model.kb_ae import get_context_of_masked
 from kb_ae_bert.utils.settings import (
     dataset_cache_dir,
@@ -21,7 +21,7 @@ from kb_ae_bert.utils.file import open_file_with_create_directories
 from kb_ae_bert.utils.kaggle import download_dataset
 from kb_ae_bert.utils.docker import create_or_reuse_docker, allocate_port
 from kb_ae_bert.utils.mongo import load_dataset_files, connect_to_database
-from ..base import StaticMapDataset
+from ..base import DynamicIterableDataset
 
 
 class KDWDDataset:
@@ -29,7 +29,7 @@ class KDWDDataset:
         self,
         relation_size: int,
         context_length: int,
-        output_length: int,
+        sequence_length: int,
         tokenizer: PreTrainedTokenizerBase,
         graph_depth: int = 1,
         permute_seed: int = 0,
@@ -41,6 +41,31 @@ class KDWDDataset:
         mongo_docker_api_host: str = None,
         force_reload: bool = False,
     ):
+        """
+        Args:
+            relation_size: Number of allowed relations, sort by usage, overflowing
+                relations will be treated as "Unknown relation".
+            context_length: Length of context tokens, should be smaller than
+                sequence_length, 1/2 of it is recommended.
+            sequence_length: Length of the output sequence to model.
+            tokenizer: Tokenizer class.
+            graph_depth: Maximum depth of the BFS algorithm used to generate the graph
+                of relations starting from the target entity.
+            permute_seed: Permutation seed used to generate splits.
+            train_entity_encode_ratio: Ratio of entries used for entity encoding
+                training. Remaining are used to validate.
+            train_relation_encode_ratio: Ratio of entries used for relation encoding
+                training. Remaining are used to validate.
+            local_root_path: Local root path of saving the KDWD dataset downloaded
+                from Kaggle, if not specified, it is default to
+                "<dataset_cache_dir>/kaggle".
+            mongo_docker_name: Name of the created / reused mongo docker.
+            mongo_docker_host: Host address of the mongo docker.
+            mongo_docker_api_host: Host address of the docker API, could be different
+                from mongo_docker_host if you are using a cluster, etc.
+            force_reload: Whether force relaoding and preprocessing KDWD dataset into
+                the mongo database.
+        """
         local_root_path = local_root_path or str(
             os.path.join(dataset_cache_dir, "kaggle")
         )
@@ -48,7 +73,7 @@ class KDWDDataset:
 
         self.relation_size = relation_size
         self.context_length = context_length
-        self.output_length = output_length
+        self.sequence_length = sequence_length
         self.tokenizer = tokenizer
         self.graph_depth = graph_depth
         self.permute_seed = permute_seed
@@ -126,7 +151,6 @@ class KDWDDataset:
         self.unknown_relation_id = 0
         self.sub_part_relation_id = 1
         self.relation_index_start = 2
-
         if os.path.exists(os.path.join(preprocess_cache_dir, "kdwd.cache")):
             logging.info("Found states cache for KDWD, skipping generation.")
             self.restore(os.path.join(preprocess_cache_dir, "kdwd.cache"))
@@ -148,26 +172,103 @@ class KDWDDataset:
 
             self.save(os.path.join(preprocess_cache_dir, "kdwd.cache"))
 
+    def get_loss(self, batch, relation_logits):
+        ce_loss = t.nn.CrossEntropyLoss()
+        direction_loss = ce_loss(relation_logits[:, :2], batch.direction)
+        relation_loss = ce_loss(relation_logits[:, 2:], batch.relation)
+        return direction_loss, relation_loss
+
     def validate_relation_encode(self, batch, relation_logits):
-        raise NotImplementedError
+        direction_loss, relation_loss = self.get_loss(batch, relation_logits)
+        return {
+            "direction_loss": direction_loss.item(),
+            "relation_loss": relation_loss.item(),
+            "total_loss": direction_loss.item() + relation_loss.item(),
+        }
 
     @property
     def train_entity_encode_dataset(self):
-        raise NotImplementedError
+        return DynamicIterableDataset(self.get_generator_of_entity_encode("train"))
 
     @property
     def validate_entity_encode_dataset(self):
-        raise NotImplementedError
+        return DynamicIterableDataset(self.get_generator_of_entity_encode("validate"))
 
     @property
     def train_relation_encode_dataset(self):
-        raise NotImplementedError
+        raise DynamicIterableDataset(self.get_generator_of_relation_encode("train"))
 
     @property
     def validate_relation_encode_dataset(self):
-        raise NotImplementedError
+        raise DynamicIterableDataset(self.get_generator_of_relation_encode("validate"))
 
-    def generate_sample_of_entity_encode(self, split=None, item_id=None):
+    def get_generator_of_entity_encode(self, split: str):
+        def generator():
+            sample = self.generate_sample_of_entity_encode(split=split)
+            attention_mask = t.ones(
+                sample[0].shape, dtype=t.float32, device=sample[0].device
+            )
+            token_type_ids = t.ones_like(sample[0])
+            token_type_ids[: 2 + self.context_length] = 0
+            return {
+                "input_ids": sample[1],
+                "labels": sample[0],
+                "attention_mask": attention_mask,
+                "token_type_ids": token_type_ids,
+            }
+
+        return generator
+
+    def get_generator_of_relation_encode(self, split: str):
+        def generator():
+            sample = self.generate_sample_of_relation_encode(split=split)
+            attention_mask = t.ones(
+                sample[1].shape, dtype=t.float32, device=sample[1].device
+            )
+            token_type_ids = t.ones_like(sample[1])
+            token_type_ids[: 2 + self.context_length] = 0
+            # randomly switch direction of relation
+            if random.choice([0, 1]) == 0:
+                return {
+                    "input_ids_1": sample[1],
+                    "input_ids_2": sample[2],
+                    "attention_mask": attention_mask,
+                    "token_type_ids": token_type_ids,
+                    "relation": t.tensor(
+                        [sample[0]], dtype=sample[1].dtype, device=sample[1].device
+                    ),
+                    "direction": t.tensor(
+                        [0], dtype=sample[1].dtype, device=sample[1].device
+                    ),
+                }
+            else:
+                return {
+                    "input_ids_1": sample[2],
+                    "input_ids_2": sample[1],
+                    "attention_mask": attention_mask,
+                    "token_type_ids": token_type_ids,
+                    "relation": t.tensor(
+                        [sample[0]], dtype=sample[1].dtype, device=sample[1].device
+                    ),
+                    "direction": t.tensor(
+                        [1], dtype=sample[1].dtype, device=sample[1].device
+                    ),
+                }
+
+        return generator
+
+    def generate_sample_of_entity_encode(self, split: str = None, item_id: int = None):
+        """
+        Args:
+            split: Name of split, "train" or "validate".
+            item_id: Item id of the page.
+
+        Returns:
+            Original token ids (context + relation),
+                Long Tensor of shape (1, sequence_length).
+            Masked token ids (context + relation),
+                Long Tensor of shape (1, sequence_length).
+        """
         # first select a page
         if split is not None and item_id is None:
             page_id = random.choice(self.entity_encode_splits[split])
@@ -297,7 +398,7 @@ class KDWDDataset:
 
         # # combine context and relation
         # # Allowed number of tokens with [CLS] context [SEP] ... [SEP] excluded
-        max_relation_token_num = self.output_length - 3 - self.context_length
+        max_relation_token_num = self.sequence_length - 3 - self.context_length
         relation_token_num = 0
         relation_tuple_max_idx = 0
         for idx in range(len(original_relation_list)):
@@ -326,10 +427,10 @@ class KDWDDataset:
         )
         # # return result
         output_original = t.zeros(
-            [1, self.output_length], dtype=original_entity_context.dtype
+            [1, self.sequence_length], dtype=original_entity_context.dtype
         )
         output_masked = t.zeros(
-            [1, self.output_length], dtype=masked_entity_context.dtype
+            [1, self.sequence_length], dtype=masked_entity_context.dtype
         )
 
         output_original[0, 0] = self.tokenizer.cls_token_id
@@ -348,7 +449,16 @@ class KDWDDataset:
 
         return output_original, output_masked
 
-    def generate_sample_of_relation_encode(self, split):
+    def generate_sample_of_relation_encode(self, split: str):
+        """
+        Args:
+            split: Name of split, "train" or "validate".
+
+        Returns:
+            Relation id from entity 1 to entity 2, int.
+            Masked token ids (context + relations), of entity 1.
+            Masked token ids (context + relations), of entity 2.
+        """
         # first select a random statement(edge)
         edge_id = random.choice(self.relation_encode_splits[split])
         edge = self.db.statements.find_one({"_id": ObjectId(edge_id)})

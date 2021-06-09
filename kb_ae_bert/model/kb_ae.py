@@ -1,5 +1,4 @@
 from typing import Tuple
-from urllib.parse import urlparse
 from transformers import (
     AutoModelForMaskedLM,
     AutoModelForTokenClassification,
@@ -21,8 +20,8 @@ def get_context_of_masked(
     """
     Args:
         sentence_tokens: Token ids, LongTensor of shape (batch_size, sequence_length).
-
-        mask_position: Mask position, LongTensor of shape (batch_size,).
+        mask_position: Mask position, in range [0, sequence_length), LongTensor
+            of shape (batch_size,).
         context_length: Length of the context provided to this model.
         pad_id: Id of the `[PAD]` token.
         mask_id: Id of the `[MASK]` token.
@@ -54,10 +53,7 @@ def get_context_of_masked(
 
     # create index tensor and gather
     offset = t.arange(
-        left_context_length,
-        context_length + left_context_length,
-        dtype=t.long,
-        device=sentence_tokens.device,
+        0, context_length, dtype=t.long, device=sentence_tokens.device,
     ).unsqueeze(0)
     index = mask_position.unsqueeze(-1).repeat(1, context_length) + offset
     masked_context = t.gather(padded_sentence_tokens, dim=-1, index=index)
@@ -93,7 +89,7 @@ class KBMaskedLMEncoder(nn.Module):
         self.base = AutoModelForMaskedLM.from_pretrained(
             base_type,
             cache_dir=model_cache_dir,
-            proxies={"http": urlparse(http_proxy).path},
+            proxies=proxies,
             output_hidden_states=True,
             return_dict=True,
             **base_configs,
@@ -113,12 +109,12 @@ class KBMaskedLMEncoder(nn.Module):
         mlp = []
         if relation_mode == "concatenation_mlp":
             input_size = self.base.config.hidden_size * 2
-            for size in list(mlp_hidden_size) + [relation_size]:
+            for size in list(mlp_hidden_size) + [2 + relation_size]:
                 mlp.append(nn.Linear(input_size, size))
                 input_size = size
             self.mlp = nn.Sequential(*mlp)
         elif relation_mode == "subtraction":
-            H = np.random.randn(relation_size, self.base.config.hidden_size)
+            H = np.random.randn(2 + relation_size, self.base.config.hidden_size)
             u, s, vh = np.linalg.svd(H, full_matrices=False)
             self.relation_embedding = t.tensor(np.matmul(u, vh))
         else:
@@ -130,7 +126,9 @@ class KBMaskedLMEncoder(nn.Module):
     def hidden_size(self):
         return self.base.config.hidden_size
 
-    def compute_relation(self, tokens1, tokens2):
+    def compute_relation(
+        self, tokens1, tokens2, attention_mask=None, token_type_ids=None
+    ):
         """
         Compute the relation between two entities. The input tokens should be like:
 
@@ -139,13 +137,22 @@ class KBMaskedLMEncoder(nn.Module):
         Args:
             tokens1: Token ids, LongTensor of shape (batch_size, sequence_length)
             tokens2: Token ids, LongTensor of shape (batch_size, sequence_length)
+            attention_mask: Attention mask, FloatTensor of shape
+                (batch_size, sequence_length).
+            token_type_ids: Token type ids, LongTensor of shape
+                (batch_size, sequence_length).
 
         Returns:
             Relation between the two masked context vocabulary, which are logits
-            before softmax, FloatTensor of shape (batch_size, relation_size).
+            before softmax, FloatTensor of shape (batch_size, 2 + relation_size).
+            First two columns are direction of the relation.
         """
-        cls1 = self.__call__(tokens1)[0]
-        cls2 = self.__call__(tokens2)[0]
+        cls1 = self.__call__(
+            tokens1, attention_mask=attention_mask, token_type_ids=token_type_ids
+        )[0]
+        cls2 = self.__call__(
+            tokens2, attention_mask=attention_mask, token_type_ids=token_type_ids
+        )[0]
         if self.relation_mode == "concatenation_mlp":
             return self.mlp(t.cat((cls1, cls2), dim=1))
         elif self.relation_mode == "subtraction":
@@ -239,7 +246,7 @@ class KBMaskedLMEncoder(nn.Module):
         cls = self.__call__(input_tokens)[0]
         return cls.view(batch_size, sequence_length, -1)
 
-    def forward(self, tokens, labels=None):
+    def forward(self, tokens, attention_mask=None, token_type_ids=None, labels=None):
         """
         The input tokens should be like:
 
@@ -259,6 +266,10 @@ class KBMaskedLMEncoder(nn.Module):
 
         Args:
             tokens: Token ids, LongTensor of shape (batch_size, sequence_length).
+            attention_mask: Attention mask, FloatTensor of shape
+                (batch_size, sequence_length).
+            token_type_ids: Token type ids, LongTensor of shape
+                (batch_size, sequence_length).
             labels: Output token labels, value is in [0, vocab_size), LongTensor
                 of shape (batch_size, sequence_length).
         Returns:
@@ -270,7 +281,12 @@ class KBMaskedLMEncoder(nn.Module):
                 FloatTensor of shape (batch_size, sequence_length, vocab_size).
 
         """
-        out = self.base(input_ids=tokens, labels=labels)
+        out = self.base(
+            input_ids=tokens,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            labels=labels,
+        )
 
         return (
             out.hidden_states[-1][:, 0, :],
@@ -294,7 +310,7 @@ class KBEntityDetector(nn.Module):
         self.base = AutoModelForTokenClassification.from_pretrained(
             base_type,
             cache_dir=model_cache_dir,
-            proxies={"http": proxies},
+            proxies=proxies,
             return_dict=True,
             num_labels=2,
             **base_configs,
