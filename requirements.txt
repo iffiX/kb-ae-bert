@@ -1,0 +1,7 @@
+transformers==4.6.1
+pydantic==1.8.2
+pymongo==3.11.4
+pytorch_lightning==1.2.2
+numpy==1.20.3
+datasets==1.7.0
+torch==1.7.1

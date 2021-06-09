@@ -1,5 +1,5 @@
 import json
-from pydantic import BaseModel, validator
+from pydantic import BaseModel
 from typing import *
 
 
@@ -19,7 +19,7 @@ class KBEncoderTrainConfig(BaseModel):
     load: bool = False
     seed: int = 0
     epochs: int = 100
-    train_steps: int = 10000,
+    train_steps: int = 10000
     validate_steps: int = 100
     optimizer_class: str = "Adam"
     learning_rate: float = 5e-5
@@ -47,7 +47,7 @@ class QATrainConfig(BaseModel):
     load: bool = False
     seed: int = 0
     epochs: int = 100
-    train_steps: int = 10000,
+    train_steps: int = 10000
     validate_steps: int = 100
     optimizer_class: str = "Adam"
     learning_rate: float = 5e-5
@@ -81,8 +81,8 @@ class Config(BaseModel):
 
     # example: ["kb_encoder", "qa"]
     # config in configs must match items in pipeline
-    pipeline: List[str]
-    configs: List[Union[QATrainConfig, KBEncoderTrainConfig]]
+    pipeline: List[str] = []
+    configs: List[Union[QATrainConfig, KBEncoderTrainConfig]] = []
 
 
 def load_config(path: str):
@@ -92,4 +92,4 @@ def load_config(path: str):
 
 def save_config(config: Config, path: str):
     with open(path, "w") as f:
-        json.dump(config.dict(), f)
+        json.dump(config.dict(), f, indent=4, sort_keys=True)
