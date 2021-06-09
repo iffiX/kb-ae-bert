@@ -59,8 +59,19 @@ def get_context_of_masked(
         dtype=t.long,
         device=sentence_tokens.device,
     ).unsqueeze(0)
-    index = mask_position.unsqueeze(-1).repeat(1, context_length) + offset
+    
+    index = mask_position.unsqueeze(1).repeat(1, context_length) + offset
+
+    print(pad_id, mask_id)
+    print(batch_size, context_length)
+
+    print(batch_size, left_context_length + sequence_length + right_context_length)
+    print(offset.shape) 
+    print(index.shape)
+    print(padded_sentence_tokens.shape)
+
     masked_context = t.gather(padded_sentence_tokens, dim=-1, index=index)
+    
     masked_context[:, left_context_length] = mask_id
 
     return masked_context
@@ -71,7 +82,7 @@ class KBMaskedLMEncoder(nn.Module):
         self,
         relation_size: int,
         base_type: str = "bert-base-uncased",
-        relation_mode: str = "concatenation",
+        relation_mode: str = "concatenation_mlp",
         mlp_hidden_size: Tuple[int] = (),
         **base_configs,
     ):
@@ -93,20 +104,22 @@ class KBMaskedLMEncoder(nn.Module):
         self.base = AutoModelForMaskedLM.from_pretrained(
             base_type,
             cache_dir=model_cache_dir,
-            proxies={"http": urlparse(http_proxy).path},
+            # proxies={"http": urlparse(http_proxy).path},
             output_hidden_states=True,
             return_dict=True,
             **base_configs,
         )
         tokenizer = AutoTokenizer.from_pretrained(
-            base_type, cache_dir=model_cache_dir, proxies={"http": proxies},
+            base_type, 
+            # cache_dir=model_cache_dir, 
+            # proxies={"http": proxies},
         )
         self._pad_id = tokenizer.pad_token_id
         self._mask_id = tokenizer.mask_token_id
         self._cls_id = tokenizer.cls_token_id
         self._sep_id = tokenizer.sep_token_id
         self._input_sequence_length = (
-            tokenizer.max_model_input_sizes.get(base_type, default=None) or 512
+            tokenizer.max_model_input_sizes.get(base_type) or 512
         )
 
         # relation head on [cls]
@@ -197,9 +210,14 @@ class KBMaskedLMEncoder(nn.Module):
         device = sentence_tokens.device
         # generate masked context
         # [batch_size * sequence_length, sequence_length]
+        
+        """
+        print(sentence_tokens.unsqueeze(1).shape)
+        This has 3 dimensions, repeat was only addressing 2 dimensions
+        """
         sentence_tokens = (
             sentence_tokens.unsqueeze(1)
-            .repeat(1, sequence_length)
+            .repeat(1, sequence_length, 1)
             .flatten(start_dim=0, end_dim=1)
         )
         mask_position = t.arange(sequence_length, dtype=t.long, device=device).repeat(

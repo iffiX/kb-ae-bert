@@ -22,6 +22,7 @@ class KBEncoderTrainer(pl.LightningModule):
             mlp_hidden_size=config.mlp_hidden_size,
             **config.base_configs,
         )
+
         self.qa_tokenizer = AutoTokenizer.from_pretrained(config.base_type)
 
         if config.train_dataset_path is None:

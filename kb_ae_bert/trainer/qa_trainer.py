@@ -74,6 +74,8 @@ class QATrainer(pl.LightningModule):
             self.kb_encoder.train()
         else:
             self.kb_encoder.eval()
+        
+
         kb_embeds = self.kb_encoder.compute_sentence_embeds(
             sentence_tokens=batch["input_ids"].to(self.device),
             context_length=self.config.context_length,

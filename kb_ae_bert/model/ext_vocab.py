@@ -27,6 +27,7 @@ class ExtendVocabForQA(nn.Module):
             **base_configs: Additional configs passed to AutoModel.
         """
         super().__init__()
+        
         self.base = AutoModelForQuestionAnswering.from_pretrained(
             base_type,
             cache_dir=model_cache_dir,

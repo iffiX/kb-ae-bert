@@ -88,11 +88,28 @@ class SQuADDataset(QADataset):
         answers = []
         indexes = []
         for idx, item in enumerate(self.dataset[split]):
-            for answer in item["answers"]:
+            """
+            https://huggingface.co/datasets/squad
+            {
+                "answers": {
+                    "answer_start": [1],
+                    "text": ["This is a test text"]
+                },
+                "context": "This is a test context.",
+                "id": "1",
+                "question": "Is this a test?",
+                "title": "train test"
+            }
+            """
+            num_answers = len(item["answers"]["text"])
+            for answer_idx in range(num_answers):
                 indexes.append(idx)
                 contexts.append(item["context"])
                 questions.append(item["question"])
-                answers.append(answer)
+                answers.append({
+                    "answer_start":item["answers"]["answer_start"][answer_idx],
+                    "text":item["answers"]["text"][answer_idx]
+                    })
 
         # add end idx to answers
         self.add_end_idx(answers, contexts)
@@ -111,6 +128,7 @@ class SQuADDataset(QADataset):
 
     @staticmethod
     def add_end_idx(answers: List[Dict[str, Any]], contexts: List[str]):
+        # print(answers)
         for answer, context in zip(answers, contexts):
             gold_text = answer["text"]
             start_idx = answer["answer_start"]
