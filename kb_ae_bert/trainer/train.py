@@ -8,13 +8,11 @@ from transformers import BatchEncoding
 def train():
     # execute pipeline
     
-    kb_encoder = KBMaskedLMEncoder(relation_size=3)
-    config = QATrainConfig(train_dataset_path="squad", kb_encoder_trainable=False)
+    kb_encoder = KBMaskedLMEncoder(relation_size=1)
+    config = QATrainConfig(train_dataset_path="squad", kb_encoder_trainable=True)
 
     trainer =  QATrainer(kb_encoder, config)
-
     train_loader = trainer.train_dataloader()
-
 
     for i, batch_data in enumerate(train_loader):
         

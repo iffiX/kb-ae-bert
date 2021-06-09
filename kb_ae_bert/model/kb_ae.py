@@ -246,6 +246,7 @@ class KBMaskedLMEncoder(nn.Module):
             dtype=t.long,
             device=device,
         )
+
         input_tokens = t.cat((cls_, masked_context, sep, mask_pad, sep), dim=1)
         cls = self.__call__(input_tokens)[0]
         return cls.view(batch_size, sequence_length, -1)
