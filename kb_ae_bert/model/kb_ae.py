@@ -62,16 +62,9 @@ def get_context_of_masked(
     
     index = mask_position.unsqueeze(1).repeat(1, context_length) + offset
 
-    print(pad_id, mask_id)
-    print(batch_size, context_length)
-
-    print(batch_size, left_context_length + sequence_length + right_context_length)
-    print(offset.shape) 
-    print(index.shape)
-    print(padded_sentence_tokens.shape)
+    index = t.sub(index, left_context_length)
 
     masked_context = t.gather(padded_sentence_tokens, dim=-1, index=index)
-    
     masked_context[:, left_context_length] = mask_id
 
     return masked_context

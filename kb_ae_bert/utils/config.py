@@ -8,9 +8,9 @@ class KBEncoderTrainConfig(BaseModel):
     optimizer_class: str = "Adam"
     learning_rate: float = 5e-5
     l2_regularization: Optional[float]
-    relation_size: int = 200
-    context_length: int = 200
-    batch_size: int = 8
+    relation_size: int = 50
+    context_length: int = 50
+    batch_size: int = 1
 
     base_type: str = "bert-base-uncased"
     base_configs: Dict[str, Any] = {}
@@ -23,8 +23,8 @@ class QATrainConfig(BaseModel):
     optimizer_class: str = "Adam"
     learning_rate: float = 5e-5
     l2_regularization: Optional[float]
-    context_length: int = 200
-    batch_size: int = 8
+    context_length: int = 50
+    batch_size: int = 1
 
     base_type: str = "bert-base-uncased"
     extend_config: Optional[Dict[str, Any]]
