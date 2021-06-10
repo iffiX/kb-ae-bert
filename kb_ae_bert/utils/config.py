@@ -23,7 +23,7 @@ class KBEncoderTrainConfig(BaseModel):
     validate_steps: int = 100
     optimizer_class: str = "Adam"
     learning_rate: float = 5e-5
-    l2_regularization: Optional[float]
+    l2_regularization: float = 0
     relation_size: int = 200
     context_length: int = 200
     batch_size: int = 256
@@ -51,7 +51,7 @@ class QATrainConfig(BaseModel):
     validate_steps: int = 100
     optimizer_class: str = "Adam"
     learning_rate: float = 5e-5
-    l2_regularization: Optional[float]
+    l2_regularization: float = 0
     context_length: int = 200
     batch_size: int = 256
 

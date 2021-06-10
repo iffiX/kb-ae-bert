@@ -18,6 +18,11 @@ class SQuADDataset(QADataset):
         local_root_path = local_root_path or str(
             os.path.join(dataset_cache_dir, "huggingface")
         )
+
+        self.tokenizer = tokenizer
+        self.dataset_path = dataset_path
+        self.local_root_path = local_root_path
+
         self.dataset = load_dataset(
             path=dataset_path,
             cache_dir=local_root_path,
@@ -30,7 +35,7 @@ class SQuADDataset(QADataset):
             cache_dir=metrics_cache_dir,
             download_config=DownloadConfig(proxies=proxies),
         )
-        self.tokenizer = tokenizer
+
         self._train = None
         self._validate = None
 

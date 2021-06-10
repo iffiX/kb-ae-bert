@@ -7,6 +7,7 @@ import numpy as np
 import pickle
 import itertools
 import torch as t
+from typing import Callable, List
 from docker.types import Mount
 from bson import ObjectId
 from pymongo import ASCENDING, DESCENDING
@@ -22,6 +23,14 @@ from kb_ae_bert.utils.kaggle import download_dataset
 from kb_ae_bert.utils.docker import create_or_reuse_docker, allocate_port
 from kb_ae_bert.utils.mongo import load_dataset_files, connect_to_database
 from ..base import DynamicIterableDataset
+
+
+def default_mask_function(seq: List[int], mask_id: int):
+    return [mask_id if np.random.rand() < 0.15 else seq_item for seq_item in seq]
+
+
+class InvalidSampleError(Exception):
+    pass
 
 
 class KDWDDataset:
@@ -40,6 +49,7 @@ class KDWDDataset:
         mongo_docker_host: str = "localhost",
         mongo_docker_api_host: str = None,
         force_reload: bool = False,
+        mask_function: Callable[[List[int], int], List[int]] = default_mask_function,
     ):
         """
         Args:
@@ -48,7 +58,7 @@ class KDWDDataset:
             context_length: Length of context tokens, should be smaller than
                 sequence_length, 1/2 of it is recommended.
             sequence_length: Length of the output sequence to model.
-            tokenizer: Tokenizer class.
+            tokenizer: Tokenizer to use.
             graph_depth: Maximum depth of the BFS algorithm used to generate the graph
                 of relations starting from the target entity.
             permute_seed: Permutation seed used to generate splits.
@@ -65,6 +75,8 @@ class KDWDDataset:
                 from mongo_docker_host if you are using a cluster, etc.
             force_reload: Whether force relaoding and preprocessing KDWD dataset into
                 the mongo database.
+            mask_function: The mask function used to mask the relation section
+                of the output sequence.
         """
         local_root_path = local_root_path or str(
             os.path.join(dataset_cache_dir, "kaggle")
@@ -79,6 +91,12 @@ class KDWDDataset:
         self.permute_seed = permute_seed
         self.train_entity_encode_ratio = train_entity_encode_ratio
         self.train_relation_encode_ratio = train_relation_encode_ratio
+        self.local_root_path = local_root_path
+        self.mongo_docker_name = mongo_docker_name
+        self.mongo_docker_host = mongo_docker_host
+        self.mongo_docker_api_host = mongo_docker_api_host
+        self.force_reload = force_reload
+        self.mask_function = mask_function
 
         if mongo_docker_api_host is not None:
             os.environ["DOCKER_HOST"] = mongo_docker_api_host
@@ -140,6 +158,7 @@ class KDWDDataset:
             self.db.link_annotated_text.create_index(
                 [("sections.target_page_ids", ASCENDING)]
             )
+            self.db.link_annotated_text.createIndex([("page_id", ASCENDING)])
 
             logging.info("Indexes created.")
 
@@ -157,7 +176,7 @@ class KDWDDataset:
         else:
             logging.info("States cache for KDWD not found, generating.")
             # relations
-            self.relation_names = ["unknown relation", "is a sub token of"]
+            self.relation_names = ["<unknown relation>", "<is a sub token of>"]
             # maps property id in statements to a relation id
             self.property_to_relation_mapping = {}
             logging.info("Selecting relations by usage.")
@@ -171,6 +190,9 @@ class KDWDDataset:
             self.generate_split_for_relation_encode()
 
             self.save(os.path.join(preprocess_cache_dir, "kdwd.cache"))
+
+        # close connection to db, reopen it later, to support forking
+        self.db = None
 
     def get_loss(self, batch, relation_logits):
         ce_loss = t.nn.CrossEntropyLoss()
@@ -188,74 +210,89 @@ class KDWDDataset:
 
     @property
     def train_entity_encode_dataset(self):
-        return DynamicIterableDataset(self.get_generator_of_entity_encode("train"))
+        return DynamicIterableDataset(self.generator_of_entity_encode, ("train",))
 
     @property
     def validate_entity_encode_dataset(self):
-        return DynamicIterableDataset(self.get_generator_of_entity_encode("validate"))
+        return DynamicIterableDataset(self.generator_of_entity_encode, ("validate",))
 
     @property
     def train_relation_encode_dataset(self):
-        raise DynamicIterableDataset(self.get_generator_of_relation_encode("train"))
+        raise DynamicIterableDataset(self.generator_of_relation_encode, ("train",))
 
     @property
     def validate_relation_encode_dataset(self):
-        raise DynamicIterableDataset(self.get_generator_of_relation_encode("validate"))
+        raise DynamicIterableDataset(self.generator_of_relation_encode, ("validate",))
 
-    def get_generator_of_entity_encode(self, split: str):
-        def generator():
-            sample = self.generate_sample_of_entity_encode(split=split)
-            attention_mask = t.ones(
-                sample[0].shape, dtype=t.float32, device=sample[0].device
-            )
-            token_type_ids = t.ones_like(sample[0])
-            token_type_ids[: 2 + self.context_length] = 0
+    def generator_of_entity_encode(self, split: str):
+        self.open_db()
+        sample = self.generate_sample_of_entity_encode(split=split)
+
+        attention_mask = t.ones(
+            sample[0].shape, dtype=t.float32, device=sample[0].device
+        )
+        token_type_ids = t.ones_like(sample[0])
+        token_type_ids[: 2 + self.context_length] = 0
+        return {
+            "input_ids": sample[1],
+            "labels": sample[0],
+            "attention_mask": attention_mask,
+            "token_type_ids": token_type_ids,
+        }
+
+    def generator_of_relation_encode(self, split: str):
+        self.open_db()
+        sample = self.generate_sample_of_relation_encode(split=split)
+
+        attention_mask = t.ones(
+            sample[1].shape, dtype=t.float32, device=sample[1].device
+        )
+        token_type_ids = t.ones_like(sample[1])
+        token_type_ids[: 2 + self.context_length] = 0
+        # randomly switch direction of relation
+        if random.choice([0, 1]) == 0:
             return {
-                "input_ids": sample[1],
-                "labels": sample[0],
+                "input_ids_1": sample[1],
+                "input_ids_2": sample[2],
                 "attention_mask": attention_mask,
                 "token_type_ids": token_type_ids,
+                "relation": t.tensor(
+                    [sample[0]], dtype=sample[1].dtype, device=sample[1].device
+                ),
+                "direction": t.tensor(
+                    [0], dtype=sample[1].dtype, device=sample[1].device
+                ),
+            }
+        else:
+            return {
+                "input_ids_1": sample[2],
+                "input_ids_2": sample[1],
+                "attention_mask": attention_mask,
+                "token_type_ids": token_type_ids,
+                "relation": t.tensor(
+                    [sample[0]], dtype=sample[1].dtype, device=sample[1].device
+                ),
+                "direction": t.tensor(
+                    [1], dtype=sample[1].dtype, device=sample[1].device
+                ),
             }
 
-        return generator
+    def print_sample_of_entity_encode(self, split: str = None, item_id: int = None):
+        original, masked = self.generate_sample_of_entity_encode(split, item_id)
+        print("Original:")
+        print(self.tokenizer.decode(original[0].tolist()))
+        print("Masked:")
+        print(self.tokenizer.decode(masked[0].tolist()))
 
-    def get_generator_of_relation_encode(self, split: str):
-        def generator():
-            sample = self.generate_sample_of_relation_encode(split=split)
-            attention_mask = t.ones(
-                sample[1].shape, dtype=t.float32, device=sample[1].device
-            )
-            token_type_ids = t.ones_like(sample[1])
-            token_type_ids[: 2 + self.context_length] = 0
-            # randomly switch direction of relation
-            if random.choice([0, 1]) == 0:
-                return {
-                    "input_ids_1": sample[1],
-                    "input_ids_2": sample[2],
-                    "attention_mask": attention_mask,
-                    "token_type_ids": token_type_ids,
-                    "relation": t.tensor(
-                        [sample[0]], dtype=sample[1].dtype, device=sample[1].device
-                    ),
-                    "direction": t.tensor(
-                        [0], dtype=sample[1].dtype, device=sample[1].device
-                    ),
-                }
-            else:
-                return {
-                    "input_ids_1": sample[2],
-                    "input_ids_2": sample[1],
-                    "attention_mask": attention_mask,
-                    "token_type_ids": token_type_ids,
-                    "relation": t.tensor(
-                        [sample[0]], dtype=sample[1].dtype, device=sample[1].device
-                    ),
-                    "direction": t.tensor(
-                        [1], dtype=sample[1].dtype, device=sample[1].device
-                    ),
-                }
+    def print_sample_of_relation_encode(self, split: str = None):
+        relation, masked_1, masked_2 = self.generate_sample_of_relation_encode(split)
 
-        return generator
+        print("Relation:")
+        print(self.relation_names[relation])
+        print("Masked 1:")
+        print(self.tokenizer.decode(masked_1[0].tolist()))
+        print("Masked 2:")
+        print(self.tokenizer.decode(masked_2[0].tolist()))
 
     def generate_sample_of_entity_encode(self, split: str = None, item_id: int = None):
         """
@@ -272,140 +309,215 @@ class KDWDDataset:
         # first select a page
         if split is not None and item_id is None:
             page_id = random.choice(self.entity_encode_splits[split])
-            item_id = self.db.page.find_one({"page_id": page_id}, {"item_id": 1})[
-                "item_id"
-            ]
+            page = self.db.page.find_one({"page_id": page_id})
+            if page is None:
+                raise ValueError(f"Cannot find page with page_id={page_id}")
+            item_id = page["item_id"]
         elif item_id is not None and split is None:
             # used for generating sample for two given entities in relation sampling
-            page_id = self.db.page.find_one({"item_id": item_id}, {"page_id": 1})[
-                "page_id"
-            ]
-        else:
-            raise ValueError("You can only set split or item_id.")
-
-        # then find a link_annotated_text where page_id in sections.target_page_ids
-        context = self.db.link_annotated_text.aggregate(
-            [
-                {"$match": {"sections.target_page_ids": page_id}},
-                {"$sample": {"size": 1}},
-            ]
-        )[0]
-        for section in context["sections"]:
-            if page_id in section["target_page_ids"]:
-                text = section["text"]
-                idx = section["target_page_ids"].index(page_id)
-                link_length = section["link_lengths"][idx]
-                link_offset = section["link_offsets"][idx]
-                break
+            page = self.db.page.find_one({"item_id": item_id})
+            if page is None:
+                raise ValueError(f"Cannot find page with item_id={item_id}")
+            page_id = page["page_id"]
         else:
             raise ValueError(
-                f"Cannot find page id {page_id} in context {pprint.pformat(context)}"
+                f"You can only set split or item_id, "
+                f"but got split={split}, item_id={item_id}."
             )
 
+        entity_name = str(page["title"])
+        if len(entity_name) == 0:
+            entity_name = "unknown"
+
+        # then find a link_annotated_text where page_id in sections.target_page_ids
+        context = next(
+            self.db.link_annotated_text.aggregate(
+                [
+                    {"$match": {"sections.target_page_ids": page_id}},
+                    {"$sample": {"size": 1}},
+                ]
+            ),
+            None,
+        )
+        if context is not None:
+            possible_context = []
+            for section in context["sections"]:
+                if page_id in section["target_page_ids"]:
+                    text = section["text"]
+                    idx = section["target_page_ids"].index(page_id)
+                    link_length = section["link_lengths"][idx]
+                    link_offset = section["link_offsets"][idx]
+                    possible_context.append((text, link_length, link_offset))
+            if len(possible_context) == 0:
+                raise ValueError(
+                    f"Cannot find page id {page_id} in context {pprint.pformat(context)}"
+                )
+            text, link_length, link_offset = random.choice(possible_context)
+            # replace link with title
+            text = (
+                text[:link_offset]
+                + f" {entity_name} "
+                + text[link_offset + link_length :]
+            )
+            link_length = len(entity_name)
+            link_offset = link_offset + 1  # include space before title
+        else:
+            # fallback to use the page itself, with entity being the title
+            context = self.db.link_annotated_text.find_one({"page_id": page_id})
+            if context is None:
+                # fallback to use title only
+                text = entity_name
+                link_length = len(entity_name)
+                link_offset = 0
+            else:
+                article_body = [sec["text"] for sec in context["sections"]]
+                text = entity_name + " " + " ".join(article_body)
+                link_length = len(entity_name)
+                link_offset = 0
+
         # then use graphLookup to find items related to item_id of the page
-        graph = self.db.page.aggregate(
-            [
-                {"$match": {"item_id": item_id}},
-                {
-                    "$graphLookup": {
-                        "from": "statements",
-                        "startWith": item_id,
-                        "connectFromField": "target_item_id",
-                        "connectToField": "source_item_id",
-                        "maxDepth": self.graph_depth - 1,
-                        "depthField": "depth",
-                        "as": "graph",
-                    }
-                },
-                {"$limit": 1},
-            ]
-        )[0]["graph"]
+        graph = next(
+            self.db.page.aggregate(
+                [
+                    {"$match": {"item_id": item_id}},
+                    {
+                        "$graphLookup": {
+                            "from": "statements",
+                            "startWith": item_id,
+                            "connectFromField": "target_item_id",
+                            "connectToField": "source_item_id",
+                            "maxDepth": self.graph_depth - 1,
+                            "depthField": "depth",
+                            "as": "graph",
+                        }
+                    },
+                    {"$limit": 1},
+                ]
+            ),
+            None,
+        )
+        if graph is None:
+            raise ValueError(
+                f"Cannot create graph for page_id={page_id}, item_id={item_id}"
+            )
+        graph = graph["graph"]
         node_label_mapping = {}
         graph = sorted(graph, key=lambda e: e["depth"])
         for edge in graph:
-            node_label_mapping[edge["source_item_id"]] = None
-            node_label_mapping[edge["target_item_id"]] = None
+            node_label_mapping[edge["source_item_id"]] = "unknown"
+            node_label_mapping[edge["target_item_id"]] = "unknown"
 
-        for label in self.db.item.find(
+        # first fill entities connected with a page with page title
+        for related_page in self.db.page.find(
             {"item_id": {"$in": list(node_label_mapping.keys())}}
         ):
-            node_label_mapping[label["item_id"]] = label["en_label"]
+            related_title = str(related_page["title"])
+            if len(related_title) > 0:
+                node_label_mapping[related_page["item_id"]] = related_title
+
+        # then fill remaining unknown entities with their en_label in item table
+        for item in self.db.item.find(
+            {"item_id": {"$in": list(node_label_mapping.keys())}}
+        ):
+            en_label = str(item["en_label"])
+            if len(en_label) > 0:
+                node_label_mapping[item["item_id"]] = en_label
 
         # then tokenize, mask, pad, and return result
-        masked_entity = -1
+        entity_tokens = self.tokenizer.tokenize(
+            str(entity_name), add_special_tokens=False
+        )
+        text_tokens = self.tokenizer(
+            text, add_special_tokens=False, return_tensors="pt"
+        )
+
         # # if entity is comprised of multiple tokens
         # # mask one random token, add relation "is sub part of"
         # # else
-        # # mask entity token
-        entity_tokens = self.tokenizer.tokenize(node_label_mapping[item_id])
-        if len(entity_tokens) == 1:
-            masked_entity = item_id
+        # # mask the only token
+        masked_entity_part = len(entity_tokens) != 1
 
-        # # generate context
-        text_tokens = self.tokenizer(text, return_tensors="pt")
+        # # select the token in the entity to mask, if there is only one token,
+        # # then it is masked.
         entity_token_indexes = {
             text_tokens.char_to_token(char_idx)
             for char_idx in range(link_offset, link_offset + link_length)
         }
+        # # if there are spaces in an entity, their token index would be None
+        entity_token_indexes.discard(None)
+        entity_token_indexes = list(entity_token_indexes)
         masked_entity_token_index = random.choice(entity_token_indexes)
         masked_entity_token_id = text_tokens.input_ids[
             0, masked_entity_token_index
         ].item()
+
         masked_entity_context = get_context_of_masked(
-            sentence_tokens=text_tokens.input_ids[0, 1:-1],  # remove [CLS] and [SEP]
-            mask_position=masked_entity_token_index - 1,  # -1 since [CLS] is removed
+            sentence_tokens=text_tokens.input_ids,
+            mask_position=t.tensor([masked_entity_token_index], dtype=t.long),
             context_length=self.context_length,
             pad_id=self.tokenizer.pad_token_id,
             mask_id=self.tokenizer.mask_token_id,
         )
         original_entity_context = masked_entity_context.clone()
-        # # # masked token is always at center, after the left context
+        # # masked token is always at center, after the left context
         original_entity_context[
-            int((self.context_length - 1) / 2)
+            0, int((self.context_length - 1) / 2)
         ] = masked_entity_token_id
 
         # # generate relation
+        # # There is a [PAD] token after each relation tuple.
         original_relation_list = []
         masked_relation_list = []
         for edge in graph:
             masked_source = source = node_label_mapping[edge["source_item_id"]]
             masked_target = target = node_label_mapping[edge["target_item_id"]]
-            if edge["source_item_id"] == masked_entity:
-                masked_source = self.tokenizer.mask_token
-            if edge["target_item_id"] == masked_entity:
-                masked_target = self.tokenizer.mask_token
+            if not masked_entity_part:
+                if edge["source_item_id"] == item_id:
+                    masked_source = self.tokenizer.mask_token
+                if edge["target_item_id"] == item_id:
+                    masked_target = self.tokenizer.mask_token
             relation = self.relation_names[
                 self.property_to_relation_mapping[edge["edge_property_id"]]
             ]
             original_relation_list.append(
-                self.tokenizer.encode(f"{source} {relation} {target}")
+                self.tokenizer.encode(
+                    f"{source} {relation} {target}", add_special_tokens=False
+                )
+                + [self.tokenizer.pad_token_id]
             )
             masked_relation_list.append(
-                self.tokenizer.encode(f"{masked_source} {relation} {masked_target}")
+                self.tokenizer.encode(
+                    f"{masked_source} {relation} {masked_target}",
+                    add_special_tokens=False,
+                )
+                + [self.tokenizer.pad_token_id]
             )
 
-        if masked_entity == -1:
-            masked_relation_list = [
-                self.tokenizer.encode(
-                    f"{self.tokenizer.mask_token} "
-                    f"{self.relation_names[self.sub_part_relation_id]} "
-                    f"{node_label_mapping[item_id]}"
-                )
-            ] + masked_relation_list
-            rel = masked_relation_list[0].copy()
-            rel[0] = masked_entity_token_id
-            original_relation_list = [rel] + original_relation_list
+        # # If masked token is a subpart of the entity,
+        # # add a new relation "[MASK] is a sub part of <entity>"
+        if masked_entity_part:
+            masked_sub_part = self.tokenizer.encode(
+                f"{self.tokenizer.mask_token} "
+                f"{self.relation_names[self.sub_part_relation_id]} "
+                f"{entity_name}",
+                add_special_tokens=False,
+            ) + [self.tokenizer.pad_token_id]
+            original_sub_part = masked_sub_part.copy()
+            original_sub_part[0] = masked_entity_token_id
+            masked_relation_list = [masked_sub_part] + masked_relation_list
+            original_relation_list = [original_sub_part] + original_relation_list
 
         # # combine context and relation
         # # Allowed number of tokens with [CLS] context [SEP] ... [SEP] excluded
         max_relation_token_num = self.sequence_length - 3 - self.context_length
         relation_token_num = 0
         relation_tuple_max_idx = 0
-        for idx in range(len(original_relation_list)):
-            relation_length = len(original_relation_list[idx])
-            relation_tuple_max_idx = idx
-            if relation_token_num + relation_length > max_relation_token_num:
+        for relation in original_relation_list:
+            if relation_token_num + len(relation) > max_relation_token_num:
                 break
+            relation_token_num += len(relation)
+            relation_tuple_max_idx += 1
+
         relation_padding = [self.tokenizer.pad_token_id] * (
             max_relation_token_num - relation_token_num
         )
@@ -418,13 +530,18 @@ class KDWDDataset:
             dtype=original_entity_context.dtype,
         )
         masked_relation = t.tensor(
-            list(
-                itertools.chain(
-                    *original_relation_list[:relation_tuple_max_idx], relation_padding
-                )
+            self.mask_function(
+                list(
+                    itertools.chain(
+                        *masked_relation_list[:relation_tuple_max_idx], relation_padding
+                    )
+                ),
+                self.tokenizer.mask_token_id,
             ),
             dtype=masked_entity_context.dtype,
         )
+        if masked_relation.shape[0] != original_relation.shape[0]:
+            pass
         # # return result
         output_original = t.zeros(
             [1, self.sequence_length], dtype=original_entity_context.dtype
@@ -600,7 +717,7 @@ class KDWDDataset:
             self.property_to_relation_mapping[item["property_id"]] = len(
                 self.relation_names
             )
-            self.relation_names.append(item["en_label"])
+            self.relation_names.append(f"<{item['en_label']}>")
 
         assert len(self.relation_names) == self.relation_size
         for item in all_relations:
@@ -618,8 +735,8 @@ class KDWDDataset:
         )
         # split pages into train and validate set
         page_ids = [p["page_id"] for p in self.db.page.find({}, {"page_id": 1})]
-        np.random.seed(self.permute_seed)
-        page_ids = np.random.permutation(page_ids).tolist()
+        rnd = random.Random(self.permute_seed)
+        rnd.shuffle(page_ids)
         split = int(self.train_entity_encode_ratio * len(page_ids))
         self.entity_encode_splits["train"] = page_ids[:split]
         self.entity_encode_splits["validate"] = page_ids[split:]
@@ -634,12 +751,12 @@ class KDWDDataset:
             f"Generating splits for relation encoding, seed={self.permute_seed}."
         )
         logging.info(
-            f"Note: split index of relation encoding may take 1 GiB of memory."
+            f"Note: split index of relation encoding may take 3 GiB of memory."
         )
         # split statements into train and validate set
-        statement_ids = [str(p["_id"]) for p in self.db.page.find({}, {"_id": 1})]
-        np.random.seed(self.permute_seed)
-        statement_ids = np.random.permutation(statement_ids).tolist()
+        statement_ids = [str(p["_id"]) for p in self.db.statements.find({}, {"_id": 1})]
+        rnd = random.Random(self.permute_seed)
+        rnd.shuffle(statement_ids)
         split = int(self.train_relation_encode_ratio * len(statement_ids))
         self.relation_encode_splits["train"] = statement_ids[:split]
         self.relation_encode_splits["validate"] = statement_ids[split:]
@@ -671,3 +788,27 @@ class KDWDDataset:
                 file,
                 protocol=4,
             )
+
+    def open_db(self):
+        if self.db is None:
+            self.db = connect_to_database(self.mongo_docker_host, self.db_port, "kdwd")
+
+    def __reduce__(self):
+        return (
+            self.__class__,
+            (
+                self.relation_size,
+                self.context_length,
+                self.sequence_length,
+                self.tokenizer,
+                self.graph_depth,
+                self.permute_seed,
+                self.train_relation_encode_ratio,
+                self.train_relation_encode_ratio,
+                self.local_root_path,
+                self.mongo_docker_name,
+                self.mongo_docker_host,
+                self.mongo_docker_api_host,
+                self.force_reload,
+            ),
+        )

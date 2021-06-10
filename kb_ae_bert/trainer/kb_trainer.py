@@ -7,6 +7,7 @@ from ..model.kb_ae import KBMaskedLMEncoder
 from ..dataset.base import collate_function_dict_to_batch_encoding
 from ..dataset.kb.kdwd import KDWDDataset
 from ..utils.config import KBEncoderTrainConfig
+from ..utils.settings import proxies, model_cache_dir
 
 
 class KBEncoderTrainer(pl.LightningModule):
@@ -22,7 +23,9 @@ class KBEncoderTrainer(pl.LightningModule):
             mlp_hidden_size=config.mlp_hidden_size,
             **config.base_configs,
         )
-        self.kb_tokenizer = AutoTokenizer.from_pretrained(config.base_type)
+        self.kb_tokenizer = AutoTokenizer.from_pretrained(
+            config.base_type, cache_dir=model_cache_dir, proxies=proxies,
+        )
 
         if config.dataset == "KDWD":
             self.dataset = KDWDDataset(
@@ -36,6 +39,9 @@ class KBEncoderTrainer(pl.LightningModule):
             raise ValueError(f"Unknown KBEncoderTrainConfig.dataset: {config.dataset}")
         if config.task not in ("entity", "relation"):
             raise ValueError(f"Unknown KBEncoderTrainConfig.task: {config.task}")
+
+        # mongo client is not compatible with fork
+        t.multiprocessing.set_start_method("spawn", force=True)
 
     @property
     def monitor(self):
@@ -63,7 +69,7 @@ class KBEncoderTrainer(pl.LightningModule):
                 num_workers=self.config.load_worker_num,
             )
 
-    def validation_dataloader(self):
+    def val_dataloader(self):
         if self.config.task == "entity":
             return DataLoader(
                 dataset=self.dataset.validate_entity_encode_dataset,

@@ -8,6 +8,7 @@ from ..model.ext_vocab import ExtendVocabForQA
 from ..dataset.base import EmptyDataset
 from ..dataset.qa.squad import SQuADDataset
 from ..utils.config import QATrainConfig
+from ..utils.settings import proxies, model_cache_dir
 
 
 class QATrainer(pl.LightningModule):
@@ -24,7 +25,9 @@ class QATrainer(pl.LightningModule):
             extend_mode=config.extend_mode,
             **config.base_configs,
         )
-        self.qa_tokenizer = AutoTokenizer.from_pretrained(config.base_type)
+        self.qa_tokenizer = AutoTokenizer.from_pretrained(
+            config.base_type, cache_dir=model_cache_dir, proxies=proxies,
+        )
 
         if config.train_dataset_path is None:
             self.train_qa_dataset = None
@@ -68,7 +71,7 @@ class QATrainer(pl.LightningModule):
         else:
             return DataLoader(dataset=EmptyDataset())
 
-    def validation_dataloader(self):
+    def val_dataloader(self):
         if self.validate_qa_dataset is not None:
             return DataLoader(
                 dataset=self.validate_qa_dataset.validate_dataset,

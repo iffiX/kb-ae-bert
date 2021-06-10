@@ -3,6 +3,8 @@ from typing import Callable, Dict, List
 from torch.utils.data import Dataset, IterableDataset
 from transformers import BatchEncoding
 
+import traceback
+
 
 class StaticMapDataset(Dataset):
     def __init__(self, encodings: BatchEncoding):
@@ -16,14 +18,24 @@ class StaticMapDataset(Dataset):
 
 
 class DynamicIterableDataset(IterableDataset):
-    def __init__(self, generator: Callable[[], Dict[str, t.Tensor]]):
+    def __init__(
+        self, generator: Callable[..., Dict[str, t.Tensor]], generator_args: tuple = (),
+    ):
         self.generator = generator
+        self.generator_args = generator_args
 
     def __iter__(self):
         return self
 
     def __next__(self):
-        return self.generator()
+        try:
+            result = self.generator(*self.generator_args)
+        except StopIteration:
+            traceback.print_exc()
+            raise ValueError(
+                "The generator thrown a StopIteration exception, shouldn't happen here."
+            )
+        return result
 
 
 class EmptyDataset(Dataset):
