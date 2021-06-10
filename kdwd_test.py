@@ -36,22 +36,22 @@ if __name__ == "__main__":
     # pickle.dumps(kdwd.train_entity_encode_dataset)
     # kdwd.print_sample_of_entity_encode(split="train")
     # kdwd.print_sample_of_entity_encode(item_id=5969138)
-    # kdwd.print_sample_of_relation_encode(split="train")
+    kdwd.print_sample_of_relation_encode(split="train")
 
     # t.multiprocessing.set_start_method("spawn", force=True)
-    d = DataLoader(
-        kdwd.train_entity_encode_dataset,
-        batch_size=512,
-        collate_fn=collate_function_dict_to_batch_encoding,
-        num_workers=6,
-    )
-    begin = time.time()
-    i = 0
-    for x in d:
-        print(i)
-        if i >= 20:
-            break
-        i += 1
-    end = time.time()
-    if i != 0:
-        print(f"Average {(end-begin)*1000/i} ms")
+    # d = DataLoader(
+    #     kdwd.train_entity_encode_dataset,
+    #     batch_size=512,
+    #     collate_fn=collate_function_dict_to_batch_encoding,
+    #     num_workers=6,
+    # )
+    # begin = time.time()
+    # i = 0
+    # for x in d:
+    #     print(i)
+    #     if i >= 100:
+    #         break
+    #     i += 1
+    # end = time.time()
+    # if i != 0:
+    #     print(f"Average {(end-begin)*1000/i} ms")

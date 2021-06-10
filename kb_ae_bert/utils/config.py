@@ -19,18 +19,22 @@ class KBEncoderTrainConfig(BaseModel):
     load: bool = False
     seed: int = 0
     epochs: int = 100
-    train_steps: int = 10000
+    train_steps: int = 320000
     validate_steps: int = 100
+    batch_size: int = 2
+    accumulate_grad_batches: int = 32
+
     optimizer_class: str = "Adam"
     learning_rate: float = 5e-5
     l2_regularization: float = 0
     relation_size: int = 200
     context_length: int = 200
-    batch_size: int = 256
+
     # The process of generating samples for KB is complex
     # and needs multiprocessing.
     # This is the number of workers used in Dataloader.
     load_worker_num: int = 4
+    load_prefetch_per_worker: int = 10
 
     base_type: str = "bert-base-uncased"
     base_configs: Dict[str, Any] = {}
@@ -47,13 +51,15 @@ class QATrainConfig(BaseModel):
     load: bool = False
     seed: int = 0
     epochs: int = 100
-    train_steps: int = 10000
+    train_steps: int = 320000
     validate_steps: int = 100
+    batch_size: int = 2
+    accumulate_grad_batches: int = 32
+
     optimizer_class: str = "Adam"
     learning_rate: float = 5e-5
     l2_regularization: float = 0
     context_length: int = 200
-    batch_size: int = 256
 
     base_type: str = "bert-base-uncased"
     extend_config: Optional[Dict[str, Any]]

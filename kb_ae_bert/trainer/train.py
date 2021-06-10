@@ -77,5 +77,6 @@ def train(config: Config):
             limit_train_batches=stage_config.train_steps,
             limit_val_batches=stage_config.validate_steps,
             max_epochs=stage_config.epochs,
+            accumulate_grad_batches=stage_config.accumulate_grad_batches,
         )
         trainer.fit(stage_trainer)

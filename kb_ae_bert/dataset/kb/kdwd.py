@@ -24,13 +24,11 @@ from kb_ae_bert.utils.docker import create_or_reuse_docker, allocate_port
 from kb_ae_bert.utils.mongo import load_dataset_files, connect_to_database
 from ..base import DynamicIterableDataset
 
+logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
+
 
 def default_mask_function(seq: List[int], mask_id: int):
     return [mask_id if np.random.rand() < 0.15 else seq_item for seq_item in seq]
-
-
-class InvalidSampleError(Exception):
-    pass
 
 
 class KDWDDataset:
@@ -218,11 +216,11 @@ class KDWDDataset:
 
     @property
     def train_relation_encode_dataset(self):
-        raise DynamicIterableDataset(self.generator_of_relation_encode, ("train",))
+        return DynamicIterableDataset(self.generator_of_relation_encode, ("train",))
 
     @property
     def validate_relation_encode_dataset(self):
-        raise DynamicIterableDataset(self.generator_of_relation_encode, ("validate",))
+        return DynamicIterableDataset(self.generator_of_relation_encode, ("validate",))
 
     def generator_of_entity_encode(self, split: str):
         self.open_db()
@@ -232,7 +230,7 @@ class KDWDDataset:
             sample[0].shape, dtype=t.float32, device=sample[0].device
         )
         token_type_ids = t.ones_like(sample[0])
-        token_type_ids[: 2 + self.context_length] = 0
+        token_type_ids[:, : 2 + self.context_length] = 0
         return {
             "input_ids": sample[1],
             "labels": sample[0],
@@ -248,7 +246,7 @@ class KDWDDataset:
             sample[1].shape, dtype=t.float32, device=sample[1].device
         )
         token_type_ids = t.ones_like(sample[1])
-        token_type_ids[: 2 + self.context_length] = 0
+        token_type_ids[:, : 2 + self.context_length] = 0
         # randomly switch direction of relation
         if random.choice([0, 1]) == 0:
             return {
@@ -278,6 +276,7 @@ class KDWDDataset:
             }
 
     def print_sample_of_entity_encode(self, split: str = None, item_id: int = None):
+        self.open_db()
         original, masked = self.generate_sample_of_entity_encode(split, item_id)
         print("Original:")
         print(self.tokenizer.decode(original[0].tolist()))
@@ -285,6 +284,7 @@ class KDWDDataset:
         print(self.tokenizer.decode(masked[0].tolist()))
 
     def print_sample_of_relation_encode(self, split: str = None):
+        self.open_db()
         relation, masked_1, masked_2 = self.generate_sample_of_relation_encode(split)
 
         print("Relation:")
@@ -412,7 +412,10 @@ class KDWDDataset:
             {"item_id": {"$in": list(node_label_mapping.keys())}}
         ):
             related_title = str(related_page["title"])
-            if len(related_title) > 0:
+            if (
+                len(related_title) > 0
+                and node_label_mapping[related_page["item_id"]] == "unknown"
+            ):
                 node_label_mapping[related_page["item_id"]] = related_title
 
         # then fill remaining unknown entities with their en_label in item table
@@ -420,7 +423,7 @@ class KDWDDataset:
             {"item_id": {"$in": list(node_label_mapping.keys())}}
         ):
             en_label = str(item["en_label"])
-            if len(en_label) > 0:
+            if len(en_label) > 0 and node_label_mapping[item["item_id"]] == "unknown":
                 node_label_mapping[item["item_id"]] = en_label
 
         # then tokenize, mask, pad, and return result
@@ -540,8 +543,15 @@ class KDWDDataset:
             ),
             dtype=masked_entity_context.dtype,
         )
-        if masked_relation.shape[0] != original_relation.shape[0]:
-            pass
+        # if masked_relation.shape[0] != original_relation.shape[0]:
+        #     raise ValueError(
+        #         f"""
+        #             {masked_relation_list}
+        #             {original_relation_list}
+        #             {masked_relation}
+        #             {original_relation}
+        #         """
+        #     )
         # # return result
         output_original = t.zeros(
             [1, self.sequence_length], dtype=original_entity_context.dtype
@@ -585,7 +595,7 @@ class KDWDDataset:
         target_entity_sample = self.generate_sample_of_entity_encode(
             item_id=edge["target_item_id"]
         )
-        relation = edge["edge_property_id"]
+        relation = self.property_to_relation_mapping[edge["edge_property_id"]]
         return relation, source_entity_sample[1], target_entity_sample[1]
 
     def insert_statements_with_pages(self, path):

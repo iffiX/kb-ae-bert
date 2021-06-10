@@ -40,9 +40,6 @@ class KBEncoderTrainer(pl.LightningModule):
         if config.task not in ("entity", "relation"):
             raise ValueError(f"Unknown KBEncoderTrainConfig.task: {config.task}")
 
-        # mongo client is not compatible with fork
-        t.multiprocessing.set_start_method("spawn", force=True)
-
     @property
     def monitor(self):
         if self.config.task == "entity":
@@ -60,6 +57,7 @@ class KBEncoderTrainer(pl.LightningModule):
                 batch_size=self.config.batch_size,
                 collate_fn=collate_function_dict_to_batch_encoding,
                 num_workers=self.config.load_worker_num,
+                prefetch_factor=self.config.load_prefetch_per_worker,
             )
         else:
             return DataLoader(
@@ -67,6 +65,7 @@ class KBEncoderTrainer(pl.LightningModule):
                 batch_size=self.config.batch_size,
                 collate_fn=collate_function_dict_to_batch_encoding,
                 num_workers=self.config.load_worker_num,
+                prefetch_factor=self.config.load_prefetch_per_worker,
             )
 
     def val_dataloader(self):
@@ -76,6 +75,7 @@ class KBEncoderTrainer(pl.LightningModule):
                 batch_size=self.config.batch_size,
                 collate_fn=collate_function_dict_to_batch_encoding,
                 num_workers=self.config.load_worker_num,
+                prefetch_factor=self.config.load_prefetch_per_worker,
             )
         else:
             return DataLoader(
@@ -83,6 +83,7 @@ class KBEncoderTrainer(pl.LightningModule):
                 batch_size=self.config.batch_size,
                 collate_fn=collate_function_dict_to_batch_encoding,
                 num_workers=self.config.load_worker_num,
+                prefetch_factor=self.config.load_prefetch_per_worker,
             )
 
     # noinspection PyTypeChecker
@@ -91,12 +92,12 @@ class KBEncoderTrainer(pl.LightningModule):
         if self.config.task == "entity":
             # Masked Language model training
             out = self.kb_model(
-                token_ids=batch["input_ids"].to(self.device),
+                tokens=batch["input_ids"].to(self.device),
                 attention_mask=batch["attention_mask"].to(self.device),
                 token_type_ids=batch["token_type_ids"].to(self.device),
                 labels=batch["labels"].to(self.device),
             )
-            return out.loss
+            return out[1]
         else:
             # Relation encoding training
             # Make sure that your model is trained on MLM first
@@ -115,12 +116,12 @@ class KBEncoderTrainer(pl.LightningModule):
         if self.config.task == "entity":
             # Masked Language model validation
             out = self.kb_model(
-                token_ids=batch["input_ids"].to(self.device),
+                tokens=batch["input_ids"].to(self.device),
                 attention_mask=batch["attention_mask"].to(self.device),
                 token_type_ids=batch["token_type_ids"].to(self.device),
                 labels=batch["labels"].to(self.device),
             )
-            metrics = {"mlm_loss": out.loss}
+            metrics = {"mlm_loss": out[1]}
         else:
             # Relation encoding training
             # Make sure that your model is trained on MLM first
@@ -130,7 +131,7 @@ class KBEncoderTrainer(pl.LightningModule):
                 attention_mask=batch["attention_mask"].to(self.device),
                 token_type_ids=batch["token_type_ids"].to(self.device),
             )
-            metrics = self.dataset.validate_relation_encode_dataset(relation_logits)
+            metrics = self.dataset.validate_relation_encode(batch, relation_logits)
 
         for key, value in metrics.items():
             self.log(key, value)

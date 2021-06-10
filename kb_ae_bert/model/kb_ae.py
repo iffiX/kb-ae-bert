@@ -117,7 +117,9 @@ class KBMaskedLMEncoder(nn.Module):
         elif relation_mode == "subtraction":
             H = np.random.randn(2 + relation_size, self.base.config.hidden_size)
             u, s, vh = np.linalg.svd(H, full_matrices=False)
-            self.relation_embedding = t.tensor(np.matmul(u, vh))
+            self.relation_embedding = t.nn.Parameter(
+                t.tensor(np.matmul(u, vh), dtype=t.float32), requires_grad=False
+            )
         else:
             raise ValueError(f"Unknown relation_mode {relation_mode}")
 

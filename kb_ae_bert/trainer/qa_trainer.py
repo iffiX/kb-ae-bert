@@ -108,7 +108,7 @@ class QATrainer(pl.LightningModule):
             start_positions=batch["start_positions"].to(self.device),
             end_positions=batch["end_positions"].to(self.device),
         )
-        return out.loss
+        return out[0]
 
     # noinspection PyTypeChecker
     def validation_step(self, batch: BatchEncoding, _batch_idx):
