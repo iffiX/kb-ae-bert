@@ -1,0 +1,36 @@
+{
+    "configs": [
+        {
+            "accumulate_grad_batches": 32,
+            "base_configs": {},
+            "base_type": "bert-base-uncased",
+            "batch_size": 1,
+            "context_length": 200,
+            "epochs": 100,
+            "extend_config": {
+                "alpha": 0.1
+            },
+            "extend_mode": "ratio_mix",
+            "kb_encoder_path": "/nfs/vdisk/workspace/kb-ae-bert/train_entity_and_relation/0/checkpoint/epoch=05-total_loss-total_loss=1.44.ckpt",
+            "kb_encoder_trainable": false,
+            "kb_encoder_with_gradient_num": 1,
+            "l2_regularization": 0,
+            "learning_rate": 5e-05,
+            "load": false,
+            "optimizer_class": "Adam",
+            "seed": 0,
+            "train_dataset_path": "squad",
+            "train_steps": 1000,
+            "validate_dataset_path": "squad",
+            "validate_steps": 100
+        }
+    ],
+    "early_stopping_patience": 100,
+    "gpus": [
+        1
+    ],
+    "pipeline": [
+        "qa"
+    ],
+    "working_directory": "/nfs/vdisk/workspace/kb-ae-bert/train-qa"
+}

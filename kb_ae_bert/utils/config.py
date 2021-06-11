@@ -68,6 +68,7 @@ class QATrainConfig(BaseModel):
 
     kb_encoder_path: str = ""
     kb_encoder_trainable: bool = False
+    kb_encoder_with_gradient_num: int = 1
     # "squad", "squad_v2", "nq", etc.
     train_dataset_path: Optional[str] = "squad"
     validate_dataset_path: Optional[str] = "squad"

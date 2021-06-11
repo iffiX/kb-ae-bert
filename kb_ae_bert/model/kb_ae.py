@@ -5,6 +5,7 @@ from transformers import (
     AutoTokenizer,
 )
 from ..utils.settings import model_cache_dir, proxies
+import random
 import torch as t
 import torch.nn as nn
 import numpy as np
@@ -166,7 +167,9 @@ class KBMaskedLMEncoder(nn.Module):
             sim = t.abs(dot)
             return sim
 
-    def compute_sentence_embeds(self, sentence_tokens, context_length: int):
+    def compute_sentence_embeds(
+        self, sentence_tokens, context_length: int, with_gradient_num: int = 1
+    ):
         """
         Compute the embedding for words in a batch of sentences. The embedding is
         meant to be used by the second BERT model.
@@ -197,6 +200,11 @@ class KBMaskedLMEncoder(nn.Module):
             sentence_tokens: Token ids, LongTensor of shape
                 (batch_size, sequence_length).
             context_length: Length of the context provided to this model.
+            with_gradient_num: Since it is not possible to perform backward operation
+                on all input words (batch_size = sequence_length, exceeds memory),
+                select this number of token inputs per sample in batch to perform
+                forward with gradient. The total with gradient token number is equal to
+                batch_size * with_gradient_num
 
         Returns:
             cls embedding: Float tensor of shape
@@ -209,7 +217,7 @@ class KBMaskedLMEncoder(nn.Module):
         # [batch_size * sequence_length, sequence_length]
         sentence_tokens = (
             sentence_tokens.unsqueeze(1)
-            .repeat(1, sequence_length)
+            .repeat(1, sequence_length, 1)
             .flatten(start_dim=0, end_dim=1)
         )
         mask_position = t.arange(sequence_length, dtype=t.long, device=device).repeat(
@@ -246,8 +254,18 @@ class KBMaskedLMEncoder(nn.Module):
             device=device,
         )
         input_tokens = t.cat((cls_, masked_context, sep, mask_pad, sep), dim=1)
-        cls = self.__call__(input_tokens)[0]
-        return cls.view(batch_size, sequence_length, -1)
+        with_gradient_indexes = random.sample(
+            range(input_tokens.shape[0]), with_gradient_num * batch_size
+        )
+        cls_list = []
+        for i in range(input_tokens.shape[0]):
+            if i in with_gradient_indexes:
+                cls = self.__call__(input_tokens[i].unsqueeze(0))[0]
+            else:
+                with t.no_grad():
+                    cls = self.__call__(input_tokens[i].unsqueeze(0))[0]
+            cls_list.append(cls)
+        return t.cat(cls_list, dim=0).view(batch_size, sequence_length, -1)
 
     def forward(self, tokens, attention_mask=None, token_type_ids=None, labels=None):
         """

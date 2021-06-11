@@ -3,22 +3,27 @@ import torch as t
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, BatchEncoding
-from ..model.kb_ae import KBMaskedLMEncoder
+from .kb_trainer import KBEncoderTrainer
 from ..model.ext_vocab import ExtendVocabForQA
-from ..dataset.base import EmptyDataset
+from ..dataset.base import EmptyDataset, collate_function_dict_to_batch_encoding
 from ..dataset.qa.squad import SQuADDataset
 from ..utils.config import QATrainConfig
 from ..utils.settings import proxies, model_cache_dir
 
 
 class QATrainer(pl.LightningModule):
-    def __init__(self, kb_encoder: KBMaskedLMEncoder, config: QATrainConfig):
+    def __init__(self, config: QATrainConfig):
         super().__init__()
+        self.save_hyperparameters()
+
         np.random.seed(config.seed)
         t.random.manual_seed(config.seed)
         self.config = config
 
-        self.kb_encoder = kb_encoder
+        self.kb_encoder = KBEncoderTrainer.load_from_checkpoint(
+            config.kb_encoder_path, only_init_model=True
+        ).kb_model
+
         self.qa_model = ExtendVocabForQA(
             base_type=config.base_type,
             extend_config=config.extend_config,
@@ -29,12 +34,17 @@ class QATrainer(pl.LightningModule):
             config.base_type, cache_dir=model_cache_dir, proxies=proxies,
         )
 
+        initialized_datasets = {}
         if config.train_dataset_path is None:
             self.train_qa_dataset = None
         elif "squad" in config.train_dataset_path:
-            self.train_qa_dataset = SQuADDataset(
-                dataset_path=config.train_dataset_path, tokenizer=self.qa_tokenizer
-            )
+            if config.train_dataset_path in initialized_datasets:
+                self.train_qa_dataset = initialized_datasets[config.train_dataset_path]
+            else:
+                self.train_qa_dataset = SQuADDataset(
+                    dataset_path=config.train_dataset_path, tokenizer=self.qa_tokenizer
+                )
+                initialized_datasets[config.train_dataset_path] = self.train_qa_dataset
         else:
             raise ValueError(
                 f"Unknown QATrainConfig.train_dataset_path: {config.train_dataset_path}"
@@ -43,9 +53,18 @@ class QATrainer(pl.LightningModule):
         if config.validate_dataset_path is None:
             self.validate_qa_dataset = None
         elif "squad" in config.validate_dataset_path:
-            self.validate_qa_dataset = SQuADDataset(
-                dataset_path=config.validate_dataset_path, tokenizer=self.qa_tokenizer
-            )
+            if config.validate_dataset_path in initialized_datasets:
+                self.validate_qa_dataset = initialized_datasets[
+                    config.validate_dataset_path
+                ]
+            else:
+                self.validate_qa_dataset = SQuADDataset(
+                    dataset_path=config.validate_dataset_path,
+                    tokenizer=self.qa_tokenizer,
+                )
+                initialized_datasets[
+                    config.validate_dataset_path
+                ] = self.validate_qa_dataset
         else:
             raise ValueError(
                 f"Unknown QATrainConfig.validate_dataset_path: "
@@ -67,6 +86,7 @@ class QATrainer(pl.LightningModule):
             return DataLoader(
                 dataset=self.train_qa_dataset.train_dataset,
                 batch_size=self.config.batch_size,
+                collate_fn=collate_function_dict_to_batch_encoding,
             )
         else:
             return DataLoader(dataset=EmptyDataset())
@@ -76,6 +96,7 @@ class QATrainer(pl.LightningModule):
             return DataLoader(
                 dataset=self.validate_qa_dataset.validate_dataset,
                 batch_size=self.config.batch_size,
+                collate_fn=collate_function_dict_to_batch_encoding,
             )
         else:
             return DataLoader(dataset=EmptyDataset())
@@ -83,19 +104,20 @@ class QATrainer(pl.LightningModule):
     # noinspection PyTypeChecker
     def training_step(self, batch: BatchEncoding, batch_idx):
         batch.convert_to_tensors("pt")
-        if self.config.kb_encoder_trainable:
-            self.kb_encoder.train()
-        else:
-            self.kb_encoder.eval()
+        with_gradient_num = (
+            0
+            if not self.config.kb_encoder_trainable
+            else self.config.kb_encoder_with_gradient_num
+        )
         kb_embeds = self.kb_encoder.compute_sentence_embeds(
             sentence_tokens=batch["input_ids"].to(self.device),
             context_length=self.config.context_length,
+            with_gradient_num=with_gradient_num,
         )
         extend_tokens = t.where(
-            batch["input_ids"]
-            != self.qa_tokenizer.cls_token_id & batch["input_ids"]
-            != self.qa_tokenizer.sep_token_id & batch["input_ids"]
-            != self.qa_tokenizer.pad_token_id,
+            (batch["input_ids"] != self.qa_tokenizer.cls_token_id)
+            & (batch["input_ids"] != self.qa_tokenizer.sep_token_id)
+            & (batch["input_ids"] != self.qa_tokenizer.pad_token_id),
             1,
             0,
         )
@@ -116,12 +138,12 @@ class QATrainer(pl.LightningModule):
         kb_embeds = self.kb_encoder.compute_sentence_embeds(
             sentence_tokens=batch["input_ids"].to(self.device),
             context_length=self.config.context_length,
+            with_gradient_num=0,
         )
         extend_tokens = t.where(
-            batch["input_ids"]
-            != self.qa_tokenizer.cls_token_id & batch["input_ids"]
-            != self.qa_tokenizer.sep_token_id & batch["input_ids"]
-            != self.qa_tokenizer.pad_token_id,
+            (batch["input_ids"] != self.qa_tokenizer.cls_token_id)
+            & (batch["input_ids"] != self.qa_tokenizer.sep_token_id)
+            & (batch["input_ids"] != self.qa_tokenizer.pad_token_id),
             1,
             0,
         )

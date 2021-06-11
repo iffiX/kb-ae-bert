@@ -1,11 +1,18 @@
 import os
 import logging
+import pickle
 import torch as t
 from .base import QADataset, StaticMapDataset
 from typing import List, Dict, Any
 from transformers import PreTrainedTokenizerBase, BatchEncoding
 from datasets import load_dataset, load_metric, DownloadConfig
-from kb_ae_bert.utils.settings import dataset_cache_dir, metrics_cache_dir, proxies
+from kb_ae_bert.utils.file import open_file_with_create_directories
+from kb_ae_bert.utils.settings import (
+    dataset_cache_dir,
+    metrics_cache_dir,
+    preprocess_cache_dir,
+    proxies,
+)
 
 
 class SQuADDataset(QADataset):
@@ -38,48 +45,64 @@ class SQuADDataset(QADataset):
 
         self._train = None
         self._validate = None
+        self._train_raw = None
+        self._validate_raw = None
+
+        if os.path.exists(
+            os.path.join(preprocess_cache_dir, f"squad_{dataset_path}.cache")
+        ):
+            logging.info(
+                f"Found states cache for Squad[{dataset_path}], skipping generation."
+            )
+            self.restore(
+                os.path.join(preprocess_cache_dir, f"squad_{dataset_path}.cache")
+            )
+        else:
+            logging.info(
+                f"States cache for Squad[{dataset_path}] not found, generating."
+            )
+            self._train, self._train_raw = self.preprocess(split="train")
+            self._validate, self._validate_raw = self.preprocess(split="validation")
+            self.save(os.path.join(preprocess_cache_dir, f"squad_{dataset_path}.cache"))
 
     @property
     def train_dataset(self):
-        # lazy preprocess
-        if self._train is None:
-            self._train = self.preprocess(split="train")
         return StaticMapDataset(self._train)
 
     @property
     def validate_dataset(self):
-        if self._validate is None:
-            self._validate = self.preprocess(split="validate")
         return StaticMapDataset(self._validate)
 
     def validate(self, batch, start_logits, end_logits):
-        if self._validate is None:
-            self._validate = self.preprocess(split="validate")
         predictions = []
         references = []
         for index, input_ids, start_l, end_l in zip(
             batch["sample-index"], batch["input_ids"], start_logits, end_logits
         ):
-            sample = self._validate[index]
+            raw = self._validate_raw[index]
             # get the most likely beginning of answer with the argmax of the score
             answer_start = t.argmax(start_l)
             answer_end = t.argmax(end_l) + 1
             answer = self.tokenizer.convert_tokens_to_string(
                 self.tokenizer.convert_ids_to_tokens(input_ids[answer_start:answer_end])
             )
-            for answer_ref in sample["answers"]["text"]:
+            for i in range(len(raw["answers"]["answer_start"])):
                 predictions.append(
                     {
                         "prediction_text": answer,
-                        "id": sample["id"],
+                        "id": raw["id"],
                         "no_answer_probability": 0.0,
                     }
                 )
                 references.append(
                     {
-                        "prediction_text": answer_ref,
-                        "id": sample["id"],
-                        "no_answer_probability": 0.0,
+                        "id": raw["id"],
+                        "answers": [
+                            {"text": text, "answer_start": answer_start}
+                            for text, answer_start in zip(
+                                raw["answers"]["text"], raw["answers"]["answer_start"]
+                            )
+                        ],
                     }
                 )
 
@@ -92,12 +115,16 @@ class SQuADDataset(QADataset):
         questions = []
         answers = []
         indexes = []
+        raw = []
         for idx, item in enumerate(self.dataset[split]):
-            for answer in item["answers"]:
+            raw.append(item)
+            for text, answer_start in zip(
+                item["answers"]["text"], item["answers"]["answer_start"]
+            ):
                 indexes.append(idx)
                 contexts.append(item["context"])
                 questions.append(item["question"])
-                answers.append(answer)
+                answers.append({"text": text, "answer_start": answer_start})
 
         # add end idx to answers
         self.add_end_idx(answers, contexts)
@@ -112,7 +139,7 @@ class SQuADDataset(QADataset):
         encodings.update({"sample-index": indexes})
 
         logging.info(f"SQuADDataset finished pre-processing split {split}")
-        return encodings
+        return encodings, raw
 
     @staticmethod
     def add_end_idx(answers: List[Dict[str, Any]], contexts: List[str]):
@@ -154,3 +181,21 @@ class SQuADDataset(QADataset):
         encodings.update(
             {"start_positions": start_positions, "end_positions": end_positions}
         )
+
+    def restore(self, path):
+        save = pickle.load(open(path, "rb"))
+        for k, v in save.items():
+            setattr(self, k, v)
+
+    def save(self, path):
+        with open_file_with_create_directories(path, "wb") as file:
+            pickle.dump(
+                {
+                    "_train": self._train,
+                    "_validate": self._validate,
+                    "_train_raw": self._train_raw,
+                    "_validate_raw": self._validate_raw,
+                },
+                file,
+                protocol=4,
+            )

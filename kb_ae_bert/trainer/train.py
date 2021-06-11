@@ -1,4 +1,5 @@
 import os
+import logging
 import pytorch_lightning as pl
 from ..utils.config import *
 from .kb_trainer import KBEncoderTrainer
@@ -7,14 +8,43 @@ from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from pytorch_lightning.loggers import TensorBoardLogger
 
 
-def find_checkpoint(config, stage_ids):
+def find_checkpoint(config, stage_index):
     checkpoint_dir = os.path.join(
-        config.working_directory, str(stage_ids), "checkpoint"
+        config.working_directory, str(stage_index), "checkpoint"
     )
     sorted_by_epoch = sorted(
-        os.listdir(checkpoint_dir), key=lambda x: int(x.split("-")[0])
+        os.listdir(checkpoint_dir), key=lambda x: int(x.split("-")[0].strip("epoch="))
     )
-    return os.path.join(checkpoint_dir, sorted_by_epoch[-1])
+    if len(sorted_by_epoch) == 0:
+        return None, None
+    checkpoint = sorted_by_epoch[-1]
+    epoch = int(checkpoint.split("-")[0].strip("epoch="))
+    logging.info(f"Using checkpoint {checkpoint}")
+    return os.path.join(checkpoint_dir, checkpoint), epoch
+
+
+def safe_load(trainer_class, stage_index, config):
+    checkpoint, version = find_checkpoint(config, stage_index)
+    if checkpoint is None:
+        logging.warning(
+            f"Checkpoint not found for trainer {trainer_class}, "
+            f"stage_index={stage_index}, restart from beginning."
+        )
+        # epoch is 0
+        return trainer_class(config=config.configs[stage_index]), 0
+    try:
+        stage_trainer = trainer_class.load_from_checkpoint(checkpoint)
+    except TypeError:
+        # use current config
+        logging.warning(
+            "Note: config(hparams) not found in checkpoint, "
+            "using current config and continue."
+        )
+        stage_trainer = trainer_class.load_from_checkpoint(
+            checkpoint, config=config.configs[stage_index]
+        )
+    # reset epoch number to version + 1
+    return stage_trainer, version + 1
 
 
 def train(config: Config):
@@ -29,20 +59,15 @@ def train(config: Config):
         if stage == "kb_encoder":
             if not stage_config.load:
                 stage_trainer = KBEncoderTrainer(stage_config)
+                epoch = 0
             else:
-                stage_trainer = KBEncoderTrainer.load_from_checkpoint(
-                    find_checkpoint(config, i)
-                )
+                stage_trainer, epoch = safe_load(KBEncoderTrainer, i, config)
         elif stage == "qa":
             if not stage_config.load:
-                kb_encoder = KBEncoderTrainer.load_from_checkpoint(
-                    stage_config.kb_encoder_path
-                ).kb_model
-                stage_trainer = QATrainer(kb_encoder, stage_config)
+                stage_trainer = QATrainer(stage_config)
+                epoch = 0
             else:
-                stage_trainer = QATrainer.load_from_checkpoint(
-                    find_checkpoint(config, i)
-                )
+                stage_trainer, epoch = safe_load(QATrainer, i, config)
         else:
             raise ValueError(f"Unknown stage {stage}.")
 
@@ -77,6 +102,10 @@ def train(config: Config):
             limit_train_batches=stage_config.train_steps,
             limit_val_batches=stage_config.validate_steps,
             max_epochs=stage_config.epochs,
+            # For iterable datasets, to validate after each epoch,
+            # set check interval equal to number of training steps.
+            val_check_interval=stage_config.train_steps,
             accumulate_grad_batches=stage_config.accumulate_grad_batches,
         )
+        trainer.current_epoch = epoch
         trainer.fit(stage_trainer)

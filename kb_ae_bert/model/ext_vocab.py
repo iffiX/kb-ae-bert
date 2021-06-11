@@ -43,7 +43,7 @@ class ExtendVocabForQA(nn.Module):
             raise ValueError(f"Unknown extend_mode {extend_mode}")
         self.base_type = base_type
         self.extend_mode = extend_mode
-        self.extend_config = extend_config
+        self.extend_config = extend_config or {}
 
     def forward(
         self,
@@ -84,7 +84,8 @@ class ExtendVocabForQA(nn.Module):
                 Span-end scores (before SoftMax).
         """
         # get token embeddings
-        token_embeds = self.embeddings.word_embeddings(token_ids)
+        # TODO: adpat this to other models
+        token_embeds = self.base.bert.embeddings.word_embeddings(token_ids)
         if self.extend_mode == "ratio_mix":
             alpha = self.extend_config["alpha"]
             token_embeds = (
@@ -102,7 +103,7 @@ class ExtendVocabForQA(nn.Module):
                 extend_tokens.unsqueeze(-1) == 1, extend_embeds, token_embeds
             )
         out = self.base(
-            input_embeds=token_embeds,
+            inputs_embeds=token_embeds,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
             start_positions=start_positions,
