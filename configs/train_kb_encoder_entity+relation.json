@@ -19,7 +19,7 @@
                 "train_relation_encode_ratio": 0.9
             },
             "epochs": 200,
-            "l2_regularization": 0,
+            "l2_regularization": 1e-5,
             "learning_rate": 5e-05,
             "load": true,
             "load_worker_num": 4,

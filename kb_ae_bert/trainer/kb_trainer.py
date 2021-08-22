@@ -156,6 +156,7 @@ class KBEncoderTrainer(pl.LightningModule):
             self.log("train_loss", result[0] + result[1])
             return result[0] + result[1]
         else:
+            # entity + relation
             out = self.kb_model(
                 tokens=batch[0]["input_ids"].to(self.device),
                 attention_mask=batch[0]["attention_mask"].to(self.device),

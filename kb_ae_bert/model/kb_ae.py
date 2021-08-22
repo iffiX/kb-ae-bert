@@ -5,62 +5,11 @@ from transformers import (
     AutoTokenizer,
 )
 from ..utils.settings import model_cache_dir, proxies
+from ..utils.token import get_context_of_masked
 import random
 import torch as t
 import torch.nn as nn
 import numpy as np
-
-
-def get_context_of_masked(
-    sentence_tokens: t.Tensor,
-    mask_position: t.Tensor,
-    context_length: int,
-    pad_id: int,
-    mask_id: int,
-):
-    """
-    Args:
-        sentence_tokens: Token ids, LongTensor of shape (batch_size, sequence_length).
-        mask_position: Mask position, in range [0, sequence_length), LongTensor
-            of shape (batch_size,).
-        context_length: Length of the context provided to this model.
-        pad_id: Id of the `[PAD]` token.
-        mask_id: Id of the `[MASK]` token.
-
-    Returns:
-        For each mask position:
-        masked context = [left context tokens] [mask] [right context tokens]
-
-        masked context is token id tensor, LongTensor of shape
-            (batch_size, context_length).
-
-    """
-    assert sentence_tokens.shape[0] == mask_position.shape[0], "Batch size unequal."
-    batch_size = sentence_tokens.shape[0]
-    sequence_length = sentence_tokens.shape[1]
-    left_context_length = int((context_length - 1) / 2)
-    right_context_length = context_length - 1 - left_context_length
-
-    # pad both sides first
-    padded_sentence_tokens = t.full(
-        [batch_size, left_context_length + sequence_length + right_context_length],
-        pad_id,
-        dtype=t.long,
-        device=sentence_tokens.device,
-    )
-    padded_sentence_tokens[
-        :, left_context_length : left_context_length + sequence_length
-    ] = sentence_tokens
-
-    # create index tensor and gather
-    offset = t.arange(
-        0, context_length, dtype=t.long, device=sentence_tokens.device,
-    ).unsqueeze(0)
-    index = mask_position.unsqueeze(-1).repeat(1, context_length) + offset
-    masked_context = t.gather(padded_sentence_tokens, dim=-1, index=index)
-    masked_context[:, left_context_length] = mask_id
-
-    return masked_context
 
 
 class KBMaskedLMEncoder(nn.Module):

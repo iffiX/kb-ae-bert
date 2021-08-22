@@ -4,7 +4,9 @@ from typing import Union
 # settings.py is for global configs that do not differentiate
 # between different trainings.
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+# ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir)
+ROOT = "/nfs/vdisk/workspace/kb-ae-bert"
+
 # in requests format
 proxies = {
     "http": "http://localhost:1090",
@@ -13,19 +15,18 @@ proxies = {
 kaggle_http_proxy = "http://localhost:1090"
 kaggle_username = ""  # type: str
 kaggle_key = ""  # type: str
-model_cache_dir = str(
-    os.path.abspath(os.path.join(ROOT, os.pardir, "data", "model"))
-)  # type: str
+model_cache_dir = str(os.path.abspath(os.path.join(ROOT, "data", "model")))  # type: str
 dataset_cache_dir = str(
-    os.path.abspath(os.path.join(ROOT, os.pardir, "data", "dataset"))
+    os.path.abspath(os.path.join(ROOT, "data", "dataset"))
 )  # type: str
 metrics_cache_dir = str(
-    os.path.abspath(os.path.join(ROOT, os.pardir, "data", "metrics"))
+    os.path.abspath(os.path.join(ROOT, "data", "metrics"))
 )  # type: str
 preprocess_cache_dir = str(
-    os.path.abspath(os.path.join(ROOT, os.pardir, "data", "preprocess"))
+    os.path.abspath(os.path.join(ROOT, "data", "preprocess"))
 )  # type: str
 mongo_docker_name = "mongodb2"
+preprocess_worker_num = 8
 
 
 def reset():

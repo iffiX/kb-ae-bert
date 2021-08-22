@@ -1,28 +1,33 @@
 import os
 import csv
-import pprint
 import logging
 import random
+import h5py
 import numpy as np
 import pickle
+import pprint
 import itertools
+import functools
 import torch as t
-from typing import Callable, List
+import multiprocessing as mp
+from typing import Callable, List, Tuple
 from docker.types import Mount
 from bson import ObjectId
+from tqdm import tqdm
 from pymongo import ASCENDING, DESCENDING
 from transformers import PreTrainedTokenizerBase
-from kb_ae_bert.model.kb_ae import get_context_of_masked
+from kb_ae_bert.utils.token import get_context_of_masked
 from kb_ae_bert.utils.settings import (
     dataset_cache_dir,
     mongo_docker_name as default_mdn,
     preprocess_cache_dir,
+    preprocess_worker_num,
 )
 from kb_ae_bert.utils.file import open_file_with_create_directories
 from kb_ae_bert.utils.kaggle import download_dataset
 from kb_ae_bert.utils.docker import create_or_reuse_docker, allocate_port
 from kb_ae_bert.utils.mongo import load_dataset_files, connect_to_database
-from ..base import DynamicIterableDataset
+from ..base import StaticIterableDataset
 
 logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
 
@@ -32,6 +37,9 @@ def default_mask_function(seq: List[int], mask_id: int):
 
 
 class KDWDDataset:
+    CACHE_NAME = "kdwd_vanilla"
+    MP_INSTANCE = None
+
     def __init__(
         self,
         relation_size: int,
@@ -39,7 +47,7 @@ class KDWDDataset:
         sequence_length: int,
         tokenizer: PreTrainedTokenizerBase,
         graph_depth: int = 1,
-        permute_seed: int = 0,
+        permute_seed: int = 2147483647,
         train_entity_encode_ratio: float = 0.9,
         train_relation_encode_ratio: float = 0.9,
         local_root_path: str = None,
@@ -47,9 +55,14 @@ class KDWDDataset:
         mongo_docker_host: str = "localhost",
         mongo_docker_api_host: str = None,
         force_reload: bool = False,
+        generate_data: bool = True,
+        generate_limit: Tuple[int, int, int, int] = None,
         mask_function: Callable[[List[int], int], List[int]] = default_mask_function,
     ):
         """
+        Note:
+            The result hdf5 file may need 300GiB of disk space to store.
+
         Args:
             relation_size: Number of allowed relations, sort by usage, overflowing
                 relations will be treated as "Unknown relation".
@@ -71,8 +84,11 @@ class KDWDDataset:
             mongo_docker_host: Host address of the mongo docker.
             mongo_docker_api_host: Host address of the docker API, could be different
                 from mongo_docker_host if you are using a cluster, etc.
-            force_reload: Whether force relaoding and preprocessing KDWD dataset into
+            force_reload: Whether force reloading and preprocessing KDWD dataset into
                 the mongo database.
+            generate_data: Whether generate preprocessed data.
+            generate_limit: Size limit of generated data, order is
+                (train_entity, validate_entity, train_encode, validate_encode).
             mask_function: The mask function used to mask the relation section
                 of the output sequence.
         """
@@ -87,6 +103,7 @@ class KDWDDataset:
         self.tokenizer = tokenizer
         self.graph_depth = graph_depth
         self.permute_seed = permute_seed
+        self.torch_generator = t.Generator().manual_seed(permute_seed)
         self.train_entity_encode_ratio = train_entity_encode_ratio
         self.train_relation_encode_ratio = train_relation_encode_ratio
         self.local_root_path = local_root_path
@@ -94,6 +111,7 @@ class KDWDDataset:
         self.mongo_docker_host = mongo_docker_host
         self.mongo_docker_api_host = mongo_docker_api_host
         self.force_reload = force_reload
+        self.generate_limit = generate_limit
         self.mask_function = mask_function
 
         if mongo_docker_api_host is not None:
@@ -168,9 +186,16 @@ class KDWDDataset:
         self.unknown_relation_id = 0
         self.sub_part_relation_id = 1
         self.relation_index_start = 2
-        if os.path.exists(os.path.join(preprocess_cache_dir, "kdwd.cache")):
+
+        # Generate states cache
+        logging.info(
+            "Begin generating dataset from KDWD, " "this may require 300GiB of Disk."
+        )
+        if os.path.exists(
+            os.path.join(preprocess_cache_dir, f"{self.CACHE_NAME}.cache")
+        ):
             logging.info("Found states cache for KDWD, skipping generation.")
-            self.restore(os.path.join(preprocess_cache_dir, "kdwd.cache"))
+            self.restore(os.path.join(preprocess_cache_dir, f"{self.CACHE_NAME}.cache"))
         else:
             logging.info("States cache for KDWD not found, generating.")
             # relations
@@ -181,18 +206,60 @@ class KDWDDataset:
             self.select_relations()
 
             # generate train/validate splits
+            # Dict["split_name: str", List[Tuple["page_id: int", "item_id: int"]]]
             self.entity_encode_splits = {}
+            # Dict["split_name: str",
+            # List[Tuple["source_item_id: int", "target_item_id: int", "edge_id: int"]]]
             self.relation_encode_splits = {}
+
             logging.info("Generating splits.")
             self.generate_split_for_entity_encode()
             self.generate_split_for_relation_encode()
 
-            self.save(os.path.join(preprocess_cache_dir, "kdwd.cache"))
+            self.save(os.path.join(preprocess_cache_dir, f"{self.CACHE_NAME}.cache"))
 
-        # close connection to db, reopen it later, to support forking
+        # close connection to db and data file, reopen it later, to support forking
         self.db = None
+        self.file = None
 
-    def get_loss(self, batch, relation_logits):
+        # Generate data
+        self.is_data_generated = False
+        if os.path.exists(
+            os.path.join(preprocess_cache_dir, f"{self.CACHE_NAME}_data.hdf5")
+        ):
+            try:
+                with h5py.File(
+                    os.path.join(preprocess_cache_dir, f"{self.CACHE_NAME}_data.hdf5"),
+                    "r",
+                ) as file:
+                    assert len(file["entity"]["train"]) == len(
+                        self.entity_encode_splits["train"]
+                    )
+                    assert len(file["entity"]["validate"]) == len(
+                        self.entity_encode_splits["validate"]
+                    )
+                    assert len(file["relation"]["train"]) == len(
+                        self.relation_encode_splits["train"]
+                    )
+                    assert len(file["relation"]["validate"]) == len(
+                        self.relation_encode_splits["validate"]
+                    )
+            except Exception as e:
+                logging.info(
+                    f"Exception [{str(e)}] occurred while reading data file, "
+                    f"regenerating data."
+                )
+                os.remove(
+                    os.path.join(preprocess_cache_dir, f"{self.CACHE_NAME}_data.hdf5")
+                )
+            else:
+                self.is_data_generated = True
+        if not self.is_data_generated and generate_data:
+            self.generate_data()
+            self.is_data_generated = True
+
+    @staticmethod
+    def get_loss(batch, relation_logits):
         ce_loss = t.nn.CrossEntropyLoss()
         direction_loss = ce_loss(relation_logits[:, :2], batch.direction)
         relation_loss = ce_loss(relation_logits[:, 2:], batch.relation)
@@ -206,25 +273,59 @@ class KDWDDataset:
             "total_loss": direction_loss.item() + relation_loss.item(),
         }
 
+    def generate_data(self):
+        if not self.is_data_generated:
+            # Two step generation
+            with h5py.File(
+                os.path.join(preprocess_cache_dir, f"{self.CACHE_NAME}_data.hdf5"),
+                "w",
+                rdcc_nbytes=1024 ** 3,
+            ) as file:
+                self.generate_preprocessed_data_of_entity_encode(file)
+            with h5py.File(
+                os.path.join(preprocess_cache_dir, f"{self.CACHE_NAME}_data.hdf5"),
+                "w",
+                rdcc_nbytes=1024 ** 3,
+            ) as file:
+                self.generate_preprocessed_data_of_relation_encode(file)
+
     @property
     def train_entity_encode_dataset(self):
-        return DynamicIterableDataset(self.generator_of_entity_encode, ("train",))
+        return StaticIterableDataset(
+            len(self.entity_encode_splits["train"]),
+            self.generator_of_entity_encode,
+            ("train",),
+        )
 
     @property
     def validate_entity_encode_dataset(self):
-        return DynamicIterableDataset(self.generator_of_entity_encode, ("validate",))
+        return StaticIterableDataset(
+            len(self.entity_encode_splits["validate"]),
+            self.generator_of_entity_encode,
+            ("validate",),
+        )
 
     @property
     def train_relation_encode_dataset(self):
-        return DynamicIterableDataset(self.generator_of_relation_encode, ("train",))
+        return StaticIterableDataset(
+            len(self.relation_encode_splits["train"]),
+            self.generator_of_relation_encode,
+            ("train",),
+        )
 
     @property
     def validate_relation_encode_dataset(self):
-        return DynamicIterableDataset(self.generator_of_relation_encode, ("validate",))
+        return StaticIterableDataset(
+            len(self.relation_encode_splits["validate"]),
+            self.generator_of_relation_encode,
+            ("validate",),
+        )
 
-    def generator_of_entity_encode(self, split: str):
-        self.open_db()
-        sample = self.generate_sample_of_entity_encode(split=split)
+    def generator_of_entity_encode(self, index: int, split: str):
+        if not self.is_data_generated:
+            raise RuntimeError("Data not generated.")
+        self.open_file()
+        sample = t.from_numpy(self.file["entity"][split][index]).view(2, -1)
 
         attention_mask = t.ones(
             sample[0].shape, dtype=t.float32, device=sample[0].device
@@ -238,67 +339,244 @@ class KDWDDataset:
             "token_type_ids": token_type_ids,
         }
 
-    def generator_of_relation_encode(self, split: str):
-        self.open_db()
-        sample = self.generate_sample_of_relation_encode(split=split)
+    def generator_of_relation_encode(self, index: int, split: str):
+        if not self.is_data_generated:
+            raise RuntimeError("Data not generated.")
+        self.open_file()
+        relation = int(self.file["relation"][split][index][0])
+        # original_src, masked_src, original_tar, masked_tar
+        sample = t.from_numpy(self.file["relation"][split][index][1:]).view(2, -1)
 
-        attention_mask = t.ones(
-            sample[1].shape, dtype=t.float32, device=sample[1].device
-        )
-        token_type_ids = t.ones_like(sample[1])
+        attention_mask = t.ones(sample[0].shape, dtype=t.float32, device=sample.device)
+        token_type_ids = t.ones_like(sample[0])
         token_type_ids[:, : 2 + self.context_length] = 0
         # randomly switch direction of relation
         if random.choice([0, 1]) == 0:
             return {
-                "input_ids_1": sample[1],
-                "input_ids_2": sample[2],
-                "attention_mask": attention_mask,
-                "token_type_ids": token_type_ids,
-                "relation": t.tensor(
-                    [sample[0]], dtype=sample[1].dtype, device=sample[1].device
-                ),
-                "direction": t.tensor(
-                    [0], dtype=sample[1].dtype, device=sample[1].device
-                ),
-            }
-        else:
-            return {
-                "input_ids_1": sample[2],
+                "input_ids_1": sample[0],
                 "input_ids_2": sample[1],
                 "attention_mask": attention_mask,
                 "token_type_ids": token_type_ids,
                 "relation": t.tensor(
-                    [sample[0]], dtype=sample[1].dtype, device=sample[1].device
+                    [relation], dtype=sample.dtype, device=sample.device
                 ),
-                "direction": t.tensor(
-                    [1], dtype=sample[1].dtype, device=sample[1].device
+                "direction": t.tensor([0], dtype=sample.dtype, device=sample.device),
+            }
+        else:
+            return {
+                "input_ids_1": sample[0],
+                "input_ids_2": sample[1],
+                "attention_mask": attention_mask,
+                "token_type_ids": token_type_ids,
+                "relation": t.tensor(
+                    [relation], dtype=sample.dtype, device=sample.device
                 ),
+                "direction": t.tensor([1], dtype=sample.dtype, device=sample.device),
             }
 
     def print_sample_of_entity_encode(self, split: str = None, item_id: int = None):
-        self.open_db()
-        original, masked = self.generate_sample_of_entity_encode(split, item_id)
+        if split is not None:
+            item_id = random.choice(self.entity_encode_splits[split])[1]
+        original, masked = self.generate_sample_of_entity_encode(item_id)
         print("Original:")
         print(self.tokenizer.decode(original[0].tolist()))
         print("Masked:")
         print(self.tokenizer.decode(masked[0].tolist()))
 
-    def print_sample_of_relation_encode(self, split: str = None):
-        self.open_db()
-        relation, masked_1, masked_2 = self.generate_sample_of_relation_encode(split)
+    def print_sample_of_relation_encode(self, split: str = None, edge_id: str = None):
+        if edge_id is None:
+            edge_id = random.choice(self.relation_encode_splits[split])
+        edge = self.db.statements.find_one({"_id": ObjectId(edge_id)})
+        (
+            source_entity_original,
+            source_entity_masked,
+        ) = self.generate_sample_of_entity_encode(item_id=edge["source_item_id"])
+        (
+            target_entity_original,
+            target_entity_masked,
+        ) = self.generate_sample_of_entity_encode(item_id=edge["target_item_id"])
+
+        relation = self.property_to_relation_mapping[edge["edge_property_id"]]
 
         print("Relation:")
         print(self.relation_names[relation])
+        print("Original 1:")
+        print(self.tokenizer.decode(source_entity_original[0].tolist()))
         print("Masked 1:")
-        print(self.tokenizer.decode(masked_1[0].tolist()))
+        print(self.tokenizer.decode(source_entity_masked[0].tolist()))
+        print("Original 2:")
+        print(self.tokenizer.decode(target_entity_original[0].tolist()))
         print("Masked 2:")
-        print(self.tokenizer.decode(masked_2[0].tolist()))
+        print(self.tokenizer.decode(target_entity_masked[0].tolist()))
 
-    def generate_sample_of_entity_encode(self, split: str = None, item_id: int = None):
+    def generate_preprocessed_data_of_entity_encode(self, hdf5_file: h5py.File):
+        group = hdf5_file.create_group("entity")
+        length = self.sequence_length * 2
+        train_set = self.preprocess_limit(
+            list(enumerate(self.entity_encode_splits["train"])),
+            "entity-train",
+            self.generate_limit,
+        )
+        validate_set = self.preprocess_limit(
+            list(enumerate(self.entity_encode_splits["validate"])),
+            "entity-validate",
+            self.generate_limit,
+        )
+        total_num = len(train_set) + len(validate_set)
+        ctx = mp.get_context("fork")
+
+        logging.info(
+            f"Entity encoding dataset size: "
+            f"train={len(train_set)}, "
+            f"validate={len(validate_set)}"
+        )
+        with tqdm(
+            total=total_num, desc="Processed entities", unit=" entities"
+        ) as progress_bar, ctx.Pool(
+            processes=preprocess_worker_num,
+            initializer=self.multiprocessing_pool_initializer_of_entity_encode,
+            initargs=(self,),
+        ) as pool:
+            train_num = len(self.entity_encode_splits["train"])
+            train_dataset = group.create_dataset(
+                name="train",
+                shape=(train_num, length),
+                dtype=np.int32,
+                chunks=(1024, length),
+            )
+            for idx, row_data in pool.imap_unordered(
+                self.preprocess_entity_encode_worker, train_set, chunksize=256,
+            ):
+                train_dataset[idx] = row_data
+                progress_bar.update(1)
+
+            validate_num = len(self.entity_encode_splits["validate"])
+            validate_dataset = group.create_dataset(
+                name="validate",
+                shape=(validate_num, length),
+                dtype=np.int32,
+                chunks=(1024, length),
+            )
+
+            for idx, row_data in pool.imap(
+                self.preprocess_entity_encode_worker, validate_set, chunksize=256,
+            ):
+                validate_dataset[idx] = row_data
+                progress_bar.update(1)
+
+    @staticmethod
+    def multiprocessing_pool_initializer_of_entity_encode(self):
+        KDWDDataset.MP_INSTANCE = self
+
+    @staticmethod
+    def preprocess_entity_encode_worker(args):
+        self = KDWDDataset.MP_INSTANCE
+        idx, (_page_id, item_id) = args
+        result = self.generate_sample_of_entity_encode(item_id)
+        return idx, t.cat(result, dim=1).flatten().numpy()
+
+    def generate_preprocessed_data_of_relation_encode(self, hdf5_file: h5py.File):
+        group = hdf5_file.create_group("relation")
+        length = self.sequence_length * 2 + 1
+        train_set = self.preprocess_limit(
+            list(enumerate(self.relation_encode_splits["train"])),
+            "relation-train",
+            self.generate_limit,
+        )
+        validate_set = self.preprocess_limit(
+            list(enumerate(self.relation_encode_splits["validate"])),
+            "relation-validate",
+            self.generate_limit,
+        )
+        total_num = len(train_set) + len(validate_set)
+        ctx = mp.get_context("fork")
+
+        logging.info(
+            f"Relation encoding dataset size: "
+            f"train={len(train_set)}, "
+            f"validate={len(validate_set)}"
+        )
+
+        with tqdm(
+            total=total_num, desc="Processed relations", unit=" relations"
+        ) as progress_bar, ctx.Pool(
+            processes=preprocess_worker_num,
+            initializer=self.multiprocessing_pool_initializer_of_relation_encode,
+            initargs=(self,),
+        ) as pool:
+            train_num = len(self.relation_encode_splits["train"])
+            train_dataset = group.create_dataset(
+                name="train",
+                shape=(train_num, length),
+                dtype=np.int32,
+                chunks=(512, length),
+            )
+            for idx, row_data in pool.imap_unordered(
+                self.preprocess_relation_encode_worker, train_set, chunksize=128,
+            ):
+                train_dataset[idx] = row_data
+                progress_bar.update(1)
+
+            validate_num = len(self.relation_encode_splits["validate"])
+            validate_dataset = group.create_dataset(
+                name="validate",
+                shape=(validate_num, length),
+                dtype=np.int32,
+                chunks=(512, length),
+            )
+
+            for idx, row_data in pool.imap(
+                self.preprocess_relation_encode_worker, validate_set, chunksize=128,
+            ):
+                validate_dataset[idx] = row_data
+                progress_bar.update(1)
+
+    @staticmethod
+    def multiprocessing_pool_initializer_of_relation_encode(self):
+        KDWDDataset.MP_INSTANCE = self
+        # 512 MiB Cache for popular records on each worker (4 KiB for each record)
+        # with large amount of statements referencing it.
+        # Generating target entities is the bottleneck.
+        self.generate_sample_of_entity_encode = functools.lru_cache(maxsize=1024 * 128)(
+            self.generate_sample_of_entity_encode
+        )
+
+    @staticmethod
+    def preprocess_relation_encode_worker(args):
+        self = KDWDDataset.MP_INSTANCE
+        idx, (src_item_id, tar_item_id, edge_id) = args
+        masked_src_entity = self.generate_sample_of_entity_encode(src_item_id)[1]
+        masked_tar_entity = self.generate_sample_of_entity_encode(tar_item_id)[1]
+        result = np.concatenate(
+            (
+                np.array((edge_id,), dtype=np.int32),
+                masked_src_entity.flatten().numpy(),
+                masked_tar_entity.flatten().numpy(),
+            ),
+            axis=0,
+        )
+        return idx, result
+
+    @staticmethod
+    def preprocess_limit(task_list, task, limit):
+        task_map = {
+            "entity-train": 0,
+            "entity-validate": 1,
+            "relation-train": 2,
+            "relation-validate": 3,
+        }
+        if limit is not None and limit[task_map[task]] > 0:
+            if len(task_list) <= limit[task_map[task]]:
+                return task_list
+            else:
+                return task_list[: limit[task_map[task]]]
+        else:
+            return task_list
+
+    def generate_sample_of_entity_encode(self, item_id: int):
         """
         Args:
-            split: Name of split, "train" or "validate".
-            item_id: Item id of the page.
+            item_id: Item id of the entity.
 
         Returns:
             Original token ids (context + relation),
@@ -306,31 +584,26 @@ class KDWDDataset:
             Masked token ids (context + relation),
                 Long Tensor of shape (1, sequence_length).
         """
-        # first select a page
-        if split is not None and item_id is None:
-            page_id = random.choice(self.entity_encode_splits[split])
-            page = self.db.page.find_one({"page_id": page_id})
-            if page is None:
-                raise ValueError(f"Cannot find page with page_id={page_id}")
-            item_id = page["item_id"]
-        elif item_id is not None and split is None:
-            # used for generating sample for two given entities in relation sampling
-            page = self.db.page.find_one({"item_id": item_id})
-            if page is None:
-                raise ValueError(f"Cannot find page with item_id={item_id}")
-            page_id = page["page_id"]
-        else:
-            raise ValueError(
-                f"You can only set split or item_id, "
-                f"but got split={split}, item_id={item_id}."
-            )
+        self.open_db()
+        page = self.db.page.find_one({"item_id": item_id})
+        if page is None:
+            raise ValueError(f"Cannot find page with item_id={item_id}")
 
+        page_id = page["page_id"]
         entity_name = str(page["title"])
         if len(entity_name) == 0:
             entity_name = "unknown"
 
-        # then find a link_annotated_text where page_id in sections.target_page_ids
-        context = next(
+        # Phase 1: generate context
+        # Generate context according to the following rules:
+        # 1. If the entity page is referenced in the one / multiple text sections of
+        #    another page, sample one from them, mask the reference position.
+        # 2. If the entity page is not referenced, fallback to use the page itself,
+        #    mask the title (since title means the entity).
+        # 3. Else, use the title only as the context. (Equivalent to no semantic
+        #    information.)
+
+        annotated_text = next(
             self.db.link_annotated_text.aggregate(
                 [
                     {"$match": {"sections.target_page_ids": page_id}},
@@ -339,22 +612,24 @@ class KDWDDataset:
             ),
             None,
         )
-        if context is not None:
-            possible_context = []
-            for section in context["sections"]:
+        if annotated_text is not None:
+            possible_sections = []
+            for section in annotated_text["sections"]:
                 if page_id in section["target_page_ids"]:
                     text = section["text"]
                     idx = section["target_page_ids"].index(page_id)
                     link_length = section["link_lengths"][idx]
                     link_offset = section["link_offsets"][idx]
-                    possible_context.append((text, link_length, link_offset))
-            if len(possible_context) == 0:
+                    possible_sections.append((text, link_length, link_offset))
+            if len(possible_sections) == 0:
                 raise ValueError(
-                    f"Cannot find page id {page_id} in context {pprint.pformat(context)}"
+                    f"Cannot find page id {page_id} in "
+                    f"annotated_text {pprint.pformat(annotated_text)}"
                 )
-            text, link_length, link_offset = random.choice(possible_context)
-            # replace link with title
-            text = (
+            text, link_length, link_offset = random.choice(possible_sections)
+
+            # replace link with title to generate the raw context to be used next
+            context = (
                 text[:link_offset]
                 + f" {entity_name} "
                 + text[link_offset + link_length :]
@@ -363,19 +638,20 @@ class KDWDDataset:
             link_offset = link_offset + 1  # include space before title
         else:
             # fallback to use the page itself, with entity being the title
-            context = self.db.link_annotated_text.find_one({"page_id": page_id})
-            if context is None:
-                # fallback to use title only
-                text = entity_name
+            annotated_text = self.db.link_annotated_text.find_one({"page_id": page_id})
+            if annotated_text is not None:
+                article_body = [sec["text"] for sec in annotated_text["sections"]]
+                context = entity_name + " " + " ".join(article_body)
                 link_length = len(entity_name)
                 link_offset = 0
             else:
-                article_body = [sec["text"] for sec in context["sections"]]
-                text = entity_name + " " + " ".join(article_body)
+                # fallback to use title only
+                context = entity_name
                 link_length = len(entity_name)
                 link_offset = 0
 
-        # then use graphLookup to find items related to item_id of the page
+        # Phase 2: generate relations
+        # Generate a tree of items related to the target item
         graph = next(
             self.db.page.aggregate(
                 [
@@ -401,13 +677,16 @@ class KDWDDataset:
                 f"Cannot create graph for page_id={page_id}, item_id={item_id}"
             )
         graph = graph["graph"]
-        node_label_mapping = {}
         graph = sorted(graph, key=lambda e: e["depth"])
+
+        node_label_mapping = {}
+
         for edge in graph:
             node_label_mapping[edge["source_item_id"]] = "unknown"
             node_label_mapping[edge["target_item_id"]] = "unknown"
 
-        # first fill entities connected with a page with page title
+        # # Fill entities with the title of their connected pages,
+        # # entities in the statements are guaranteed to be connected with a page
         for related_page in self.db.page.find(
             {"item_id": {"$in": list(node_label_mapping.keys())}}
         ):
@@ -418,54 +697,43 @@ class KDWDDataset:
             ):
                 node_label_mapping[related_page["item_id"]] = related_title
 
-        # then fill remaining unknown entities with their en_label in item table
-        for item in self.db.item.find(
-            {"item_id": {"$in": list(node_label_mapping.keys())}}
-        ):
-            en_label = str(item["en_label"])
-            if len(en_label) > 0 and node_label_mapping[item["item_id"]] == "unknown":
-                node_label_mapping[item["item_id"]] = en_label
-
-        # then tokenize, mask, pad, and return result
-        entity_tokens = self.tokenizer.tokenize(
-            str(entity_name), add_special_tokens=False
-        )
-        text_tokens = self.tokenizer(
-            text, add_special_tokens=False, return_tensors="pt"
-        )
+        # Phase 3: tokenize, mask, pad, and return result
 
         # # if entity is comprised of multiple tokens
         # # mask one random token, add relation "is sub part of"
         # # else
         # # mask the only token
-        masked_entity_part = len(entity_tokens) != 1
+        is_entity_partly_masked = (
+            len(self.tokenizer.tokenize(str(entity_name), add_special_tokens=False))
+            != 1
+        )
+
+        context_tokens = self.tokenizer(
+            context, add_special_tokens=False, return_tensors="pt"
+        )
 
         # # select the token in the entity to mask, if there is only one token,
         # # then it is masked.
         entity_token_indexes = {
-            text_tokens.char_to_token(char_idx)
+            context_tokens.char_to_token(char_idx)
             for char_idx in range(link_offset, link_offset + link_length)
         }
         # # if there are spaces in an entity, their token index would be None
         entity_token_indexes.discard(None)
         entity_token_indexes = list(entity_token_indexes)
         masked_entity_token_index = random.choice(entity_token_indexes)
-        masked_entity_token_id = text_tokens.input_ids[
+        masked_entity_token_id = context_tokens.input_ids[
             0, masked_entity_token_index
         ].item()
 
-        masked_entity_context = get_context_of_masked(
-            sentence_tokens=text_tokens.input_ids,
+        original_entity_context, masked_entity_context = get_context_of_masked(
+            sentence_tokens=context_tokens.input_ids,
             mask_position=t.tensor([masked_entity_token_index], dtype=t.long),
             context_length=self.context_length,
             pad_id=self.tokenizer.pad_token_id,
             mask_id=self.tokenizer.mask_token_id,
+            generator=self.torch_generator,
         )
-        original_entity_context = masked_entity_context.clone()
-        # # masked token is always at center, after the left context
-        original_entity_context[
-            0, int((self.context_length - 1) / 2)
-        ] = masked_entity_token_id
 
         # # generate relation
         # # There is a [PAD] token after each relation tuple.
@@ -474,11 +742,14 @@ class KDWDDataset:
         for edge in graph:
             masked_source = source = node_label_mapping[edge["source_item_id"]]
             masked_target = target = node_label_mapping[edge["target_item_id"]]
-            if not masked_entity_part:
+
+            # only replace the target entity with [MASK] if it is completely masked.
+            if not is_entity_partly_masked:
                 if edge["source_item_id"] == item_id:
                     masked_source = self.tokenizer.mask_token
                 if edge["target_item_id"] == item_id:
                     masked_target = self.tokenizer.mask_token
+
             relation = self.relation_names[
                 self.property_to_relation_mapping[edge["edge_property_id"]]
             ]
@@ -498,7 +769,7 @@ class KDWDDataset:
 
         # # If masked token is a subpart of the entity,
         # # add a new relation "[MASK] is a sub part of <entity>"
-        if masked_entity_part:
+        if is_entity_partly_masked:
             masked_sub_part = self.tokenizer.encode(
                 f"{self.tokenizer.mask_token} "
                 f"{self.relation_names[self.sub_part_relation_id]} "
@@ -576,28 +847,6 @@ class KDWDDataset:
 
         return output_original, output_masked
 
-    def generate_sample_of_relation_encode(self, split: str):
-        """
-        Args:
-            split: Name of split, "train" or "validate".
-
-        Returns:
-            Relation id from entity 1 to entity 2, int.
-            Masked token ids (context + relations), of entity 1.
-            Masked token ids (context + relations), of entity 2.
-        """
-        # first select a random statement(edge)
-        edge_id = random.choice(self.relation_encode_splits[split])
-        edge = self.db.statements.find_one({"_id": ObjectId(edge_id)})
-        source_entity_sample = self.generate_sample_of_entity_encode(
-            item_id=edge["source_item_id"]
-        )
-        target_entity_sample = self.generate_sample_of_entity_encode(
-            item_id=edge["target_item_id"]
-        )
-        relation = self.property_to_relation_mapping[edge["edge_property_id"]]
-        return relation, source_entity_sample[1], target_entity_sample[1]
-
     def insert_statements_with_pages(self, path):
         logging.info(f"Getting item ids of pages, this will take some time!")
         page_item_ids = {
@@ -606,12 +855,13 @@ class KDWDDataset:
         logging.info(f"Begin inserting statements, this will take a LONG time!")
         if "statements" in self.db.list_collection_names():
             self.db.statements.drop()
-        with open(path, "r") as csv_file:
+        with open(path, "r") as csv_file, tqdm(
+            desc="Inserted ", unit=" statements"
+        ) as progress_bar:
             reader = csv.reader(csv_file)
             # skip header
             next(reader, None)
 
-            insert_count = 0
             documents = []
             for row in reader:
                 source_item_id = int(row[0])
@@ -627,85 +877,11 @@ class KDWDDataset:
                     )
                 if len(documents) >= 1000000:
                     self.db.statements.insert_many(documents)
-                    logging.info(f"Inserted {insert_count} statements in total.")
-                    insert_count += len(documents)
+                    progress_bar.update(len(documents))
                     documents = []
             if len(documents) > 0:
                 self.db.statements.insert_many(documents)
-                insert_count += len(documents)
-            logging.info(f"Inserted {insert_count} statements in total.")
-
-    def remove_statements_without_pages(self):
-        # DEPRECATED
-        pass
-
-        # remove statements whose source_item_id or target_item_id is not
-        # an item id of a page.
-        # Will remove about 3/2 entries of 141206853 entries in total
-        logging.info(
-            "Removing statements with one end not connected to a page, "
-            "this operation will take a LONG time!"
-        )
-
-        # operation batch
-        remove_count = 0
-        ops = []
-
-        # delete statements whose source_item_id doesn't match
-        remove = self.db.statements.aggregate(
-            [
-                {
-                    "$lookup": {
-                        "from": "page",
-                        "localField": "source_item_id",
-                        "foreignField": "item_id",
-                        "as": "result",
-                    }
-                },
-                {"$match": {"result.page_id": {"$exists": False}}},
-                {"$project": {"_id": 1}},
-            ]
-        )
-        for rem in remove:
-            ops.append({"deleteOne": {"filter": {"_id": rem["_id"]}}})
-            if len(ops) >= 1000:
-                self.db.statements.bulk_write(ops)
-                remove_count += len(ops)
-                logging.info(f"Removed {remove_count} entries in total.")
-                ops = []
-        if len(ops) > 0:
-            self.db.statements.bulk_write(ops)
-            remove_count += len(ops)
-            logging.info(f"Removed {remove_count} entries in total.")
-            ops = []
-
-        # delete statements whose target_item_id doesn't match
-        remove = self.db.statements.aggregate(
-            [
-                {
-                    "$lookup": {
-                        "from": "page",
-                        "localField": "target_item_id",
-                        "foreignField": "item_id",
-                        "as": "result",
-                    }
-                },
-                {"$match": {"result.page_id": {"$exists": False}}},
-                {"$project": {"_id": 1}},
-            ]
-        )
-        for rem in remove:
-            ops.append({"deleteOne": {"filter": {"_id": rem["_id"]}}})
-            if len(ops) >= 1000:
-                self.db.statements.bulk_write(ops)
-                remove_count += len(ops)
-                logging.info(f"Removed {remove_count} entries in total.")
-                ops = []
-        if len(ops) > 0:
-            self.db.statements.bulk_write(ops)
-            remove_count += len(ops)
-            logging.info(f"Removed {remove_count} entries in total.")
-        logging.info(f"Finish removing disconnected statements.")
+                progress_bar.update(len(documents))
 
     def select_relations(self):
         all_relations_size = self.db.property.count({})
@@ -741,10 +917,13 @@ class KDWDDataset:
             f"Generating splits for entity encoding, seed={self.permute_seed}."
         )
         logging.info(
-            f"Note: split index of entity encoding may take 100 MiB of memory."
+            f"Note: split index of entity encoding may take 200 MiB of memory."
         )
         # split pages into train and validate set
-        page_ids = [p["page_id"] for p in self.db.page.find({}, {"page_id": 1})]
+        page_ids = [
+            (p["page_id"], p["item_id"])
+            for p in self.db.page.find({}, {"page_id": 1, "item_id": 1})
+        ]
         rnd = random.Random(self.permute_seed)
         rnd.shuffle(page_ids)
         split = int(self.train_entity_encode_ratio * len(page_ids))
@@ -764,7 +943,12 @@ class KDWDDataset:
             f"Note: split index of relation encoding may take 3 GiB of memory."
         )
         # split statements into train and validate set
-        statement_ids = [str(p["_id"]) for p in self.db.statements.find({}, {"_id": 1})]
+        statement_ids = [
+            (p["source_item_id"], p["target_item_id"], p["edge_property_id"])
+            for p in self.db.statements.find(
+                {}, {"source_item_id": 1, "target_item_id": 1, "edge_property_id": 1}
+            )
+        ]
         rnd = random.Random(self.permute_seed)
         rnd.shuffle(statement_ids)
         split = int(self.train_relation_encode_ratio * len(statement_ids))
@@ -803,6 +987,12 @@ class KDWDDataset:
         if self.db is None:
             self.db = connect_to_database(self.mongo_docker_host, self.db_port, "kdwd")
 
+    def open_file(self):
+        if self.file is None:
+            self.file = h5py.File(
+                os.path.join(preprocess_cache_dir, f"{self.CACHE_NAME}_data.hdf5"), "r"
+            )
+
     def __reduce__(self):
         return (
             self.__class__,
@@ -813,12 +1003,16 @@ class KDWDDataset:
                 self.tokenizer,
                 self.graph_depth,
                 self.permute_seed,
-                self.train_relation_encode_ratio,
+                self.train_entity_encode_ratio,
                 self.train_relation_encode_ratio,
                 self.local_root_path,
                 self.mongo_docker_name,
                 self.mongo_docker_host,
                 self.mongo_docker_api_host,
                 self.force_reload,
+                # Disable generating data in subprocess, throw exception directly
+                False,
+                self.generate_limit,
+                self.mask_function,
             ),
         )

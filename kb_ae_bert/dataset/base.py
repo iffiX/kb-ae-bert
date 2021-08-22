@@ -19,6 +19,24 @@ class StaticMapDataset(Dataset):
         return len(self.encodings.input_ids)
 
 
+class StaticIterableDataset(Dataset):
+    def __init__(
+        self,
+        length: int,
+        generator: Callable[..., Dict[str, t.Tensor]],
+        generator_args: tuple = (),
+    ):
+        self.length = length
+        self.generator = generator
+        self.generator_args = generator_args
+
+    def __getitem__(self, idx: int):
+        return self.generator(idx, *self.generator_args)
+
+    def __len__(self):
+        return self.length
+
+
 class DynamicIterableDataset(IterableDataset):
     def __init__(
         self, generator: Callable[..., Dict[str, t.Tensor]], generator_args: tuple = (),

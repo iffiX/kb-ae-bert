@@ -4,7 +4,7 @@
             "accumulate_grad_batches": 32,
             "base_configs": {},
             "base_type": "bert-base-uncased",
-            "batch_size": 1,
+            "batch_size": 2,
             "context_length": 200,
             "epochs": 100,
             "extend_config": {
