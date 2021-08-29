@@ -76,7 +76,7 @@ class QATrainer(pl.LightningModule):
         if "squad" in self.config.train_dataset_path:
             # See https://github.com/huggingface/datasets/blob/
             # master/metrics/squad_v2/squad_v2.py
-            # "f1" or "exact for EM score
+            # "f1" or "exact" for EM score
             return "f1"
         else:
             return "f1"

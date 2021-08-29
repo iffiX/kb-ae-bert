@@ -7,26 +7,22 @@ import numpy as np
 import pickle
 import pprint
 import itertools
-import functools
 import torch as t
 import multiprocessing as mp
 from typing import Callable, List, Tuple
-from docker.types import Mount
-from bson import ObjectId
 from tqdm import tqdm
 from pymongo import ASCENDING, DESCENDING
 from transformers import PreTrainedTokenizerBase
 from kb_ae_bert.utils.token import get_context_of_masked
 from kb_ae_bert.utils.settings import (
     dataset_cache_dir,
-    mongo_docker_name as default_mdn,
+    mongo_config,
     preprocess_cache_dir,
     preprocess_worker_num,
 )
 from kb_ae_bert.utils.file import open_file_with_create_directories
 from kb_ae_bert.utils.kaggle import download_dataset
-from kb_ae_bert.utils.docker import create_or_reuse_docker, allocate_port
-from kb_ae_bert.utils.mongo import load_dataset_files, connect_to_database
+from kb_ae_bert.utils.mongo import MongoDBHandler
 from ..base import StaticIterableDataset
 
 logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
@@ -36,8 +32,8 @@ def default_mask_function(seq: List[int], mask_id: int):
     return [mask_id if np.random.rand() < 0.15 else seq_item for seq_item in seq]
 
 
-class KDWDDataset:
-    CACHE_NAME = "kdwd_vanilla"
+class KDWDBertDataset:
+    CACHE_NAME = "kdwd_bert"
     MP_INSTANCE = None
 
     def __init__(
@@ -50,13 +46,8 @@ class KDWDDataset:
         permute_seed: int = 2147483647,
         train_entity_encode_ratio: float = 0.9,
         train_relation_encode_ratio: float = 0.9,
-        local_root_path: str = None,
-        mongo_docker_name: str = None,
-        mongo_docker_host: str = "localhost",
-        mongo_docker_api_host: str = None,
         force_reload: bool = False,
         generate_data: bool = True,
-        generate_limit: Tuple[int, int, int, int] = None,
         mask_function: Callable[[List[int], int], List[int]] = default_mask_function,
     ):
         """
@@ -77,26 +68,12 @@ class KDWDDataset:
                 training. Remaining are used to validate.
             train_relation_encode_ratio: Ratio of entries used for relation encoding
                 training. Remaining are used to validate.
-            local_root_path: Local root path of saving the KDWD dataset downloaded
-                from Kaggle, if not specified, it is default to
-                "<dataset_cache_dir>/kaggle".
-            mongo_docker_name: Name of the created / reused mongo docker.
-            mongo_docker_host: Host address of the mongo docker.
-            mongo_docker_api_host: Host address of the docker API, could be different
-                from mongo_docker_host if you are using a cluster, etc.
             force_reload: Whether force reloading and preprocessing KDWD dataset into
                 the mongo database.
             generate_data: Whether generate preprocessed data.
-            generate_limit: Size limit of generated data, order is
-                (train_entity, validate_entity, train_encode, validate_encode).
             mask_function: The mask function used to mask the relation section
                 of the output sequence.
         """
-        local_root_path = local_root_path or str(
-            os.path.join(dataset_cache_dir, "kaggle")
-        )
-        mongo_docker_name = mongo_docker_name or default_mdn
-
         self.relation_size = relation_size
         self.context_length = context_length
         self.sequence_length = sequence_length
@@ -106,47 +83,35 @@ class KDWDDataset:
         self.torch_generator = t.Generator().manual_seed(permute_seed)
         self.train_entity_encode_ratio = train_entity_encode_ratio
         self.train_relation_encode_ratio = train_relation_encode_ratio
-        self.local_root_path = local_root_path
-        self.mongo_docker_name = mongo_docker_name
-        self.mongo_docker_host = mongo_docker_host
-        self.mongo_docker_api_host = mongo_docker_api_host
+        self.mongo_db_handler = MongoDBHandler(**mongo_config)
         self.force_reload = force_reload
-        self.generate_limit = generate_limit
         self.mask_function = mask_function
 
-        if mongo_docker_api_host is not None:
-            os.environ["DOCKER_HOST"] = mongo_docker_api_host
-        self.db_docker, is_reused = create_or_reuse_docker(
-            image="mongo:latest",
-            startup_args={
-                "ports": {"27017": allocate_port()},
-                "mounts": [
-                    Mount(
-                        target="/mnt/dataset",
-                        source=local_root_path,
-                        type="bind",
-                        read_only=True,
-                    )
-                ],
-            },
-            reuse_name=mongo_docker_name,
+        self.db = self.mongo_db_handler.get_database("kdwd")
+        collection_names = self.db.list_collection_names()
+        is_db_reusable = (
+            "item" in collection_names
+            and "statements" in collection_names
+            and "page" in collection_names
+            and "link_annotated_text" in collection_names
         )
-        self.db_port = int(
-            self.db_docker.attrs["HostConfig"]["PortBindings"]["27017/tcp"][0][
-                "HostPort"
-            ]
-        )
+        if not is_db_reusable or force_reload:
+            kaggle_path = str(os.path.join(dataset_cache_dir, "kaggle"))
 
-        download_dataset(
-            "kenshoresearch/kensho-derived-wikimedia-data", local_root_path
-        )
-        if not is_reused or force_reload:
             # load dataset into the database
+            logging.info(
+                f"Existing collections are {collection_names}, "
+                f"required are: item, statements, page, link_annotated_text, "
+                f"regenerating."
+            )
+            download_dataset(
+                "kenshoresearch/kensho-derived-wikimedia-data", kaggle_path
+            )
+
             # we don't load statements.csv as we need to preprocess it
-            load_dataset_files(
-                self.db_docker,
+            self.mongo_db_handler.load_dataset_files(
                 "kdwd",
-                str(os.path.join(local_root_path, "kensho-derived-wikimedia-data")),
+                str(os.path.join(kaggle_path, "kensho-derived-wikimedia-data")),
                 [
                     "item.csv",
                     "item_aliases.csv",
@@ -156,11 +121,10 @@ class KDWDDataset:
                     "property_aliases.csv",
                 ],
             )
-            self.db = connect_to_database(mongo_docker_host, self.db_port, "kdwd")
 
             self.insert_statements_with_pages(
                 os.path.join(
-                    local_root_path, "kensho-derived-wikimedia-data", "statements.csv"
+                    kaggle_path, "kensho-derived-wikimedia-data", "statements.csv",
                 )
             )
 
@@ -178,19 +142,11 @@ class KDWDDataset:
 
             logging.info("Indexes created.")
 
-            # remove disconnected statements
-            # self.remove_statements_without_pages()
-        else:
-            self.db = connect_to_database(mongo_docker_host, self.db_port, "kdwd")
-
         self.unknown_relation_id = 0
         self.sub_part_relation_id = 1
         self.relation_index_start = 2
 
         # Generate states cache
-        logging.info(
-            "Begin generating dataset from KDWD, " "this may require 300GiB of Disk."
-        )
         if os.path.exists(
             os.path.join(preprocess_cache_dir, f"{self.CACHE_NAME}.cache")
         ):
@@ -209,7 +165,9 @@ class KDWDDataset:
             # Dict["split_name: str", List[Tuple["page_id: int", "item_id: int"]]]
             self.entity_encode_splits = {}
             # Dict["split_name: str",
-            # List[Tuple["source_item_id: int", "target_item_id: int", "edge_id: int"]]]
+            # List[Tuple["source_item_id: int",
+            #            "target_item_id: int",
+            #            "property_id: int"]]]
             self.relation_encode_splits = {}
 
             logging.info("Generating splits.")
@@ -220,43 +178,68 @@ class KDWDDataset:
 
         # close connection to db and data file, reopen it later, to support forking
         self.db = None
-        self.file = None
+        self.entity_file = None
+        self.relation_file = None
 
         # Generate data
-        self.is_data_generated = False
+        self.is_entity_data_generated = False
+        self.is_relation_data_generated = False
         if os.path.exists(
-            os.path.join(preprocess_cache_dir, f"{self.CACHE_NAME}_data.hdf5")
+            os.path.join(preprocess_cache_dir, f"{self.CACHE_NAME}_entity_data.hdf5")
         ):
             try:
                 with h5py.File(
-                    os.path.join(preprocess_cache_dir, f"{self.CACHE_NAME}_data.hdf5"),
+                    os.path.join(
+                        preprocess_cache_dir, f"{self.CACHE_NAME}_entity_data.hdf5"
+                    ),
                     "r",
                 ) as file:
-                    assert len(file["entity"]["train"]) == len(
-                        self.entity_encode_splits["train"]
-                    )
-                    assert len(file["entity"]["validate"]) == len(
-                        self.entity_encode_splits["validate"]
-                    )
-                    assert len(file["relation"]["train"]) == len(
-                        self.relation_encode_splits["train"]
-                    )
-                    assert len(file["relation"]["validate"]) == len(
-                        self.relation_encode_splits["validate"]
-                    )
+                    assert len(file["entity"]["train"]) > 0
+                    assert len(file["entity"]["validate"]) > 0
             except Exception as e:
                 logging.info(
-                    f"Exception [{str(e)}] occurred while reading data file, "
+                    f"Exception [{str(e)}] occurred while reading entity data file, "
                     f"regenerating data."
                 )
                 os.remove(
-                    os.path.join(preprocess_cache_dir, f"{self.CACHE_NAME}_data.hdf5")
+                    os.path.join(
+                        preprocess_cache_dir, f"{self.CACHE_NAME}_entity_data.hdf5"
+                    )
                 )
             else:
-                self.is_data_generated = True
-        if not self.is_data_generated and generate_data:
+                logging.info("Found entity data for KDWD, skipping generation.")
+                self.is_entity_data_generated = True
+        if os.path.exists(
+            os.path.join(preprocess_cache_dir, f"{self.CACHE_NAME}_relation_data.hdf5")
+        ):
+            try:
+                with h5py.File(
+                    os.path.join(
+                        preprocess_cache_dir, f"{self.CACHE_NAME}_relation_data.hdf5"
+                    ),
+                    "r",
+                ) as file:
+                    assert len(file["relation"]["train"]) > 0
+                    assert len(file["relation"]["validate"]) > 0
+            except Exception as e:
+                logging.info(
+                    f"Exception [{str(e)}] occurred while reading relation data file, "
+                    f"regenerating data."
+                )
+                os.remove(
+                    os.path.join(
+                        preprocess_cache_dir, f"{self.CACHE_NAME}_relation_data.hdf5"
+                    )
+                )
+            else:
+                logging.info("Found relation data for KDWD, skipping generation.")
+                self.is_relation_data_generated = True
+        if (
+            not self.is_entity_data_generated or not self.is_relation_data_generated
+        ) and generate_data:
             self.generate_data()
-            self.is_data_generated = True
+            self.is_entity_data_generated = True
+            self.is_relation_data_generated = True
 
     @staticmethod
     def get_loss(batch, relation_logits):
@@ -274,20 +257,30 @@ class KDWDDataset:
         }
 
     def generate_data(self):
-        if not self.is_data_generated:
-            # Two step generation
+        if not self.is_entity_data_generated:
             with h5py.File(
-                os.path.join(preprocess_cache_dir, f"{self.CACHE_NAME}_data.hdf5"),
+                os.path.join(
+                    preprocess_cache_dir, f"{self.CACHE_NAME}_entity_data.hdf5"
+                ),
                 "w",
                 rdcc_nbytes=1024 ** 3,
             ) as file:
                 self.generate_preprocessed_data_of_entity_encode(file)
+        if not self.is_relation_data_generated:
             with h5py.File(
-                os.path.join(preprocess_cache_dir, f"{self.CACHE_NAME}_data.hdf5"),
+                os.path.join(
+                    preprocess_cache_dir, f"{self.CACHE_NAME}_entity_data.hdf5"
+                ),
+                "r",
+                rdcc_nbytes=1024 ** 3,
+            ) as entity_file, h5py.File(
+                os.path.join(
+                    preprocess_cache_dir, f"{self.CACHE_NAME}_relation_data.hdf5"
+                ),
                 "w",
                 rdcc_nbytes=1024 ** 3,
             ) as file:
-                self.generate_preprocessed_data_of_relation_encode(file)
+                self.generate_preprocessed_data_of_relation_encode(entity_file, file)
 
     @property
     def train_entity_encode_dataset(self):
@@ -322,111 +315,185 @@ class KDWDDataset:
         )
 
     def generator_of_entity_encode(self, index: int, split: str):
-        if not self.is_data_generated:
+        if not self.is_entity_data_generated:
             raise RuntimeError("Data not generated.")
         self.open_file()
-        sample = t.from_numpy(self.file["entity"][split][index]).view(2, -1)
-
-        attention_mask = t.ones(
-            sample[0].shape, dtype=t.float32, device=sample[0].device
+        sample = (
+            t.from_numpy(self.entity_file["entity"][split][index])
+            .to(dtype=t.long)
+            .view(2, -1)
         )
-        token_type_ids = t.ones_like(sample[0])
+
+        shape = (1, self.sequence_length)
+        device = sample.device
+
+        attention_mask = t.ones(shape, dtype=t.float32, device=device)
+        token_type_ids = t.ones(shape, dtype=t.long, device=device)
         token_type_ids[:, : 2 + self.context_length] = 0
         return {
-            "input_ids": sample[1],
-            "labels": sample[0],
+            "input_ids": sample[1].view(shape),
+            "labels": sample[0].view(shape),
             "attention_mask": attention_mask,
             "token_type_ids": token_type_ids,
         }
 
     def generator_of_relation_encode(self, index: int, split: str):
-        if not self.is_data_generated:
+        if not self.is_relation_data_generated:
             raise RuntimeError("Data not generated.")
         self.open_file()
-        relation = int(self.file["relation"][split][index][0])
+        relation = int(self.relation_file["relation"][split][index][0])
         # original_src, masked_src, original_tar, masked_tar
-        sample = t.from_numpy(self.file["relation"][split][index][1:]).view(2, -1)
+        sample = (
+            t.from_numpy(self.relation_file["relation"][split][index][1:])
+            .to(dtype=t.long)
+            .view(2, -1)
+        )
 
-        attention_mask = t.ones(sample[0].shape, dtype=t.float32, device=sample.device)
-        token_type_ids = t.ones_like(sample[0])
+        shape = (1, self.sequence_length)
+        device = sample.device
+
+        attention_mask = t.ones(shape, dtype=t.float32, device=device)
+        token_type_ids = t.ones(shape, dtype=t.long, device=device)
         token_type_ids[:, : 2 + self.context_length] = 0
         # randomly switch direction of relation
         if random.choice([0, 1]) == 0:
             return {
-                "input_ids_1": sample[0],
-                "input_ids_2": sample[1],
+                "input_ids_1": sample[0].view(shape),
+                "input_ids_2": sample[1].view(shape),
                 "attention_mask": attention_mask,
                 "token_type_ids": token_type_ids,
-                "relation": t.tensor(
-                    [relation], dtype=sample.dtype, device=sample.device
-                ),
-                "direction": t.tensor([0], dtype=sample.dtype, device=sample.device),
+                "relation": t.tensor([relation], dtype=t.long, device=sample.device),
+                "direction": t.tensor([0], dtype=t.long, device=sample.device),
             }
         else:
             return {
-                "input_ids_1": sample[0],
-                "input_ids_2": sample[1],
+                "input_ids_1": sample[0].view(shape),
+                "input_ids_2": sample[1].view(shape),
                 "attention_mask": attention_mask,
                 "token_type_ids": token_type_ids,
-                "relation": t.tensor(
-                    [relation], dtype=sample.dtype, device=sample.device
-                ),
-                "direction": t.tensor([1], dtype=sample.dtype, device=sample.device),
+                "relation": t.tensor([relation], dtype=t.long, device=sample.device),
+                "direction": t.tensor([1], dtype=t.long, device=sample.device),
             }
 
     def print_sample_of_entity_encode(self, split: str = None, item_id: int = None):
         if split is not None:
             item_id = random.choice(self.entity_encode_splits[split])[1]
-        original, masked = self.generate_sample_of_entity_encode(item_id)
+        if not self.is_entity_data_generated:
+            print("Note: Preprocessed data not generated, generate using database.")
+            original, masked = self.generate_sample_of_entity_encode(item_id)
+            original, masked = original[0].tolist(), masked[0].tolist()
+        else:
+            print("Note: Preprocessed data found, generate using preprocessed data.")
+            self.open_file()
+            split, index = self.find_entity(item_id)
+            original, masked = self.entity_file["entity"][split][index].reshape(2, -1)
+            original, masked = original.tolist(), masked.tolist()
+
+        print(f"Item id: {item_id}")
         print("Original:")
-        print(self.tokenizer.decode(original[0].tolist()))
+        print(self.tokenizer.decode(original))
         print("Masked:")
-        print(self.tokenizer.decode(masked[0].tolist()))
+        print(self.tokenizer.decode(masked))
 
-    def print_sample_of_relation_encode(self, split: str = None, edge_id: str = None):
-        if edge_id is None:
-            edge_id = random.choice(self.relation_encode_splits[split])
-        edge = self.db.statements.find_one({"_id": ObjectId(edge_id)})
-        (
-            source_entity_original,
-            source_entity_masked,
-        ) = self.generate_sample_of_entity_encode(item_id=edge["source_item_id"])
-        (
-            target_entity_original,
-            target_entity_masked,
-        ) = self.generate_sample_of_entity_encode(item_id=edge["target_item_id"])
+    def find_entity(self, item_id):
+        for index, (_, entity_item_id) in enumerate(self.entity_encode_splits["train"]):
+            if entity_item_id == item_id:
+                return "train", index
+        for index, (_, entity_item_id) in enumerate(
+            self.entity_encode_splits["validate"]
+        ):
+            if entity_item_id == item_id:
+                return "validate", index
+        raise ValueError(f"Item id {item_id} not found in train or validate set.")
 
-        relation = self.property_to_relation_mapping[edge["edge_property_id"]]
+    def print_sample_of_relation_encode(
+        self, split: str = None, edge: Tuple[int, int, int] = None
+    ):
+        if edge is None:
+            edge = random.choice(self.relation_encode_splits[split])
+        if not self.is_relation_data_generated or not self.is_entity_data_generated:
+            print("Note: Preprocessed data not generated, generate using database.")
+            (
+                source_entity_original,
+                source_entity_masked,
+            ) = self.generate_sample_of_entity_encode(item_id=edge[0])
+            (
+                target_entity_original,
+                target_entity_masked,
+            ) = self.generate_sample_of_entity_encode(item_id=edge[1])
+
+            relation = self.property_to_relation_mapping[edge[2]]
+            source_entity_original = source_entity_original[0].tolist()
+            source_entity_masked = source_entity_masked[0].tolist()
+            target_entity_original = target_entity_original[0].tolist()
+            target_entity_masked = target_entity_masked[0].tolist()
+        else:
+            print("Note: Preprocessed data found, generate using preprocessed data.")
+            self.open_file()
+            src_index, tar_index, edge_index = self.find_relation(*edge)
+            source_entity_original, source_entity_masked = self.entity_file["entity"][
+                src_index[0]
+            ][src_index[1]].reshape(2, -1)
+            target_entity_original, target_entity_masked = self.entity_file["entity"][
+                tar_index[0]
+            ][tar_index[1]].reshape(2, -1)
+
+            edge_data = self.relation_file["relation"][edge_index[0]][edge_index[1]]
+            relation = edge_data[0]
+            edge_source_masked, edge_target_masked = edge_data[1:].reshape(2, -1)
+            assert np.array_equal(edge_source_masked, source_entity_masked), (
+                f"Entity and edge source doesn't match: "
+                f"\nEdge: {self.tokenizer.decode(edge_source_masked.tolist())}"
+                f"\nEntity: {self.tokenizer.decode(source_entity_masked.tolist())}"
+            )
+            assert np.array_equal(edge_target_masked, target_entity_masked), (
+                f"Entity and edge target doesn't match: "
+                f"\nEdge: {self.tokenizer.decode(edge_target_masked.tolist())}"
+                f"\nEntity: {self.tokenizer.decode(target_entity_masked.tolist())}"
+            )
+
+            source_entity_original = source_entity_original.tolist()
+            source_entity_masked = source_entity_masked.tolist()
+            target_entity_original = target_entity_original.tolist()
+            target_entity_masked = target_entity_masked.tolist()
 
         print("Relation:")
         print(self.relation_names[relation])
         print("Original 1:")
-        print(self.tokenizer.decode(source_entity_original[0].tolist()))
+        print(self.tokenizer.decode(source_entity_original))
         print("Masked 1:")
-        print(self.tokenizer.decode(source_entity_masked[0].tolist()))
+        print(self.tokenizer.decode(source_entity_masked))
         print("Original 2:")
-        print(self.tokenizer.decode(target_entity_original[0].tolist()))
+        print(self.tokenizer.decode(target_entity_original))
         print("Masked 2:")
-        print(self.tokenizer.decode(target_entity_masked[0].tolist()))
+        print(self.tokenizer.decode(target_entity_masked))
+
+    def find_relation(self, src_item_id, tar_item_id, property_id):
+        src_index = self.find_entity(src_item_id)
+        tar_index = self.find_entity(tar_item_id)
+        edge = (src_item_id, tar_item_id, property_id)
+        try:
+            edge_index = ("train", self.relation_encode_splits["train"].index(edge))
+        except ValueError:
+            try:
+                edge_index = (
+                    "validate",
+                    self.relation_encode_splits["validate"].index(edge),
+                )
+            except ValueError:
+                raise ValueError(f"Edge {edge} not found in train or validate set.")
+        return src_index, tar_index, edge_index
 
     def generate_preprocessed_data_of_entity_encode(self, hdf5_file: h5py.File):
         group = hdf5_file.create_group("entity")
         length = self.sequence_length * 2
-        train_set = self.preprocess_limit(
-            list(enumerate(self.entity_encode_splits["train"])),
-            "entity-train",
-            self.generate_limit,
-        )
-        validate_set = self.preprocess_limit(
-            list(enumerate(self.entity_encode_splits["validate"])),
-            "entity-validate",
-            self.generate_limit,
-        )
+        train_set = list(enumerate(self.entity_encode_splits["train"]))
+        validate_set = list(enumerate(self.entity_encode_splits["validate"]))
         total_num = len(train_set) + len(validate_set)
         ctx = mp.get_context("fork")
 
         logging.info(
-            f"Entity encoding dataset size: "
+            f"Generating entity encoding dataset, size: "
             f"train={len(train_set)}, "
             f"validate={len(validate_set)}"
         )
@@ -466,55 +533,72 @@ class KDWDDataset:
 
     @staticmethod
     def multiprocessing_pool_initializer_of_entity_encode(self):
-        KDWDDataset.MP_INSTANCE = self
+        KDWDBertDataset.MP_INSTANCE = self
 
     @staticmethod
     def preprocess_entity_encode_worker(args):
-        self = KDWDDataset.MP_INSTANCE
+        self = KDWDBertDataset.MP_INSTANCE
         idx, (_page_id, item_id) = args
         result = self.generate_sample_of_entity_encode(item_id)
         return idx, t.cat(result, dim=1).flatten().numpy()
 
-    def generate_preprocessed_data_of_relation_encode(self, hdf5_file: h5py.File):
+    def generate_preprocessed_data_of_relation_encode(
+        self, entity_hdf5_file: h5py.File, hdf5_file: h5py.File
+    ):
+        entity_group = entity_hdf5_file["entity"]
         group = hdf5_file.create_group("relation")
         length = self.sequence_length * 2 + 1
-        train_set = self.preprocess_limit(
-            list(enumerate(self.relation_encode_splits["train"])),
-            "relation-train",
-            self.generate_limit,
-        )
-        validate_set = self.preprocess_limit(
-            list(enumerate(self.relation_encode_splits["validate"])),
-            "relation-validate",
-            self.generate_limit,
-        )
+        train_set = list(enumerate(self.relation_encode_splits["train"]))
+        validate_set = list(enumerate(self.relation_encode_splits["validate"]))
         total_num = len(train_set) + len(validate_set)
-        ctx = mp.get_context("fork")
 
         logging.info(
-            f"Relation encoding dataset size: "
+            f"Generating relation encoding dataset, size: "
             f"train={len(train_set)}, "
             f"validate={len(validate_set)}"
         )
+        logging.info("Stopping mongo database for memory reservation.")
+        self.mongo_db_handler.stop()
+
+        logging.info("Loading entity data from hdf5 file")
+        # Order is original -> masked, only load the masked part for more memory.
+        entity_data = {
+            "train": entity_group["train"][:, self.sequence_length :],
+            "validate": entity_group["validate"][:, self.sequence_length :],
+        }
+
+        logging.info("Generating entity index")
+        entity_index = {}
+        for idx, (_, item_id) in enumerate(self.entity_encode_splits["train"]):
+            entity_index[item_id] = ("train", idx)
+        for idx, (_, item_id) in enumerate(self.entity_encode_splits["validate"]):
+            entity_index[item_id] = ("validate", idx)
 
         with tqdm(
             total=total_num, desc="Processed relations", unit=" relations"
-        ) as progress_bar, ctx.Pool(
-            processes=preprocess_worker_num,
-            initializer=self.multiprocessing_pool_initializer_of_relation_encode,
-            initargs=(self,),
-        ) as pool:
+        ) as progress_bar:
             train_num = len(self.relation_encode_splits["train"])
             train_dataset = group.create_dataset(
                 name="train",
                 shape=(train_num, length),
                 dtype=np.int32,
-                chunks=(512, length),
+                chunks=(2048, length),
             )
-            for idx, row_data in pool.imap_unordered(
-                self.preprocess_relation_encode_worker, train_set, chunksize=128,
-            ):
-                train_dataset[idx] = row_data
+            for idx, (src_item_id, tar_item_id, property_id) in train_set:
+                src_entity_idx = entity_index.get(src_item_id, None)
+                tar_entity_idx = entity_index.get(tar_item_id, None)
+                if src_entity_idx is not None and tar_entity_idx is not None:
+                    train_dataset[idx] = np.concatenate(
+                        (
+                            np.array(
+                                (self.property_to_relation_mapping[property_id],),
+                                dtype=np.int32,
+                            ),
+                            entity_data[src_entity_idx[0]][src_entity_idx[1]],
+                            entity_data[tar_entity_idx[0]][tar_entity_idx[1]],
+                        ),
+                        axis=0,
+                    )
                 progress_bar.update(1)
 
             validate_num = len(self.relation_encode_splits["validate"])
@@ -522,56 +606,27 @@ class KDWDDataset:
                 name="validate",
                 shape=(validate_num, length),
                 dtype=np.int32,
-                chunks=(512, length),
+                chunks=(2048, length),
             )
 
-            for idx, row_data in pool.imap(
-                self.preprocess_relation_encode_worker, validate_set, chunksize=128,
-            ):
-                validate_dataset[idx] = row_data
+            for idx, (src_item_id, tar_item_id, property_id) in validate_set:
+                src_entity_idx = entity_index.get(src_item_id, None)
+                tar_entity_idx = entity_index.get(tar_item_id, None)
+                if src_entity_idx is not None and tar_entity_idx is not None:
+                    validate_dataset[idx] = np.concatenate(
+                        (
+                            np.array(
+                                (self.property_to_relation_mapping[property_id],),
+                                dtype=np.int32,
+                            ),
+                            entity_data[src_entity_idx[0]][src_entity_idx[1]],
+                            entity_data[tar_entity_idx[0]][tar_entity_idx[1]],
+                        ),
+                        axis=0,
+                    )
                 progress_bar.update(1)
-
-    @staticmethod
-    def multiprocessing_pool_initializer_of_relation_encode(self):
-        KDWDDataset.MP_INSTANCE = self
-        # 512 MiB Cache for popular records on each worker (4 KiB for each record)
-        # with large amount of statements referencing it.
-        # Generating target entities is the bottleneck.
-        self.generate_sample_of_entity_encode = functools.lru_cache(maxsize=1024 * 128)(
-            self.generate_sample_of_entity_encode
-        )
-
-    @staticmethod
-    def preprocess_relation_encode_worker(args):
-        self = KDWDDataset.MP_INSTANCE
-        idx, (src_item_id, tar_item_id, edge_id) = args
-        masked_src_entity = self.generate_sample_of_entity_encode(src_item_id)[1]
-        masked_tar_entity = self.generate_sample_of_entity_encode(tar_item_id)[1]
-        result = np.concatenate(
-            (
-                np.array((edge_id,), dtype=np.int32),
-                masked_src_entity.flatten().numpy(),
-                masked_tar_entity.flatten().numpy(),
-            ),
-            axis=0,
-        )
-        return idx, result
-
-    @staticmethod
-    def preprocess_limit(task_list, task, limit):
-        task_map = {
-            "entity-train": 0,
-            "entity-validate": 1,
-            "relation-train": 2,
-            "relation-validate": 3,
-        }
-        if limit is not None and limit[task_map[task]] > 0:
-            if len(task_list) <= limit[task_map[task]]:
-                return task_list
-            else:
-                return task_list[: limit[task_map[task]]]
-        else:
-            return task_list
+        logging.info("Restarting mongo database.")
+        self.mongo_db_handler.start()
 
     def generate_sample_of_entity_encode(self, item_id: int):
         """
@@ -985,12 +1040,22 @@ class KDWDDataset:
 
     def open_db(self):
         if self.db is None:
-            self.db = connect_to_database(self.mongo_docker_host, self.db_port, "kdwd")
+            self.db = self.mongo_db_handler.get_database("kdwd")
 
     def open_file(self):
-        if self.file is None:
-            self.file = h5py.File(
-                os.path.join(preprocess_cache_dir, f"{self.CACHE_NAME}_data.hdf5"), "r"
+        if self.entity_file is None:
+            self.entity_file = h5py.File(
+                os.path.join(
+                    preprocess_cache_dir, f"{self.CACHE_NAME}_entity_data.hdf5"
+                ),
+                "r",
+            )
+        if self.relation_file is None:
+            self.relation_file = h5py.File(
+                os.path.join(
+                    preprocess_cache_dir, f"{self.CACHE_NAME}_relation_data.hdf5"
+                ),
+                "r",
             )
 
     def __reduce__(self):
@@ -1005,14 +1070,9 @@ class KDWDDataset:
                 self.permute_seed,
                 self.train_entity_encode_ratio,
                 self.train_relation_encode_ratio,
-                self.local_root_path,
-                self.mongo_docker_name,
-                self.mongo_docker_host,
-                self.mongo_docker_api_host,
                 self.force_reload,
                 # Disable generating data in subprocess, throw exception directly
                 False,
-                self.generate_limit,
                 self.mask_function,
             ),
         )

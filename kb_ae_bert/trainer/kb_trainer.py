@@ -6,7 +6,7 @@ from transformers import AutoTokenizer, BatchEncoding
 from pytorch_lightning.trainer.supporters import CombinedLoader
 from ..model.kb_ae import KBMaskedLMEncoder
 from ..dataset.base import collate_function_dict_to_batch_encoding
-from ..dataset.kb.kdwd import KDWDDataset
+from ..dataset.kb.kdwd import KDWDBertDataset
 from ..utils.config import KBEncoderTrainConfig
 from ..utils.settings import proxies, model_cache_dir
 
@@ -32,7 +32,7 @@ class KBEncoderTrainer(pl.LightningModule):
             )
 
             if config.dataset == "KDWD":
-                self.dataset = KDWDDataset(
+                self.dataset = KDWDBertDataset(
                     relation_size=config.relation_size,
                     context_length=config.context_length,
                     sequence_length=self.kb_tokenizer.model_max_length,

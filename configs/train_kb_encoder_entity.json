@@ -1,10 +1,10 @@
 {
     "configs": [
         {
-            "accumulate_grad_batches": 16,
+            "accumulate_grad_batches": 32,
             "base_configs": {},
             "base_type": "bert-base-uncased",
-            "batch_size": 4,
+            "batch_size": 2,
             "context_length": 200,
             "dataset": "KDWD",
             "dataset_config": {
@@ -22,8 +22,6 @@
             "l2_regularization": 0,
             "learning_rate": 5e-05,
             "load": false,
-            "load_worker_num": 2,
-            "load_prefetch_per_worker": 5,
             "mlp_hidden_size": [],
             "optimizer_class": "Adam",
             "relation_mode": "subtraction",
@@ -36,10 +34,10 @@
     ],
     "early_stopping_patience": 100,
     "gpus": [
-        0
+        0,
     ],
     "pipeline": [
         "kb_encoder"
     ],
-    "working_directory": "/nfs/vdisk/workspace/kb-ae-bert/train"
+    "working_directory": "/nfs/vdisk/workspace/kb-ae-bert/train_entity"
 }

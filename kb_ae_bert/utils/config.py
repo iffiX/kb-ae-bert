@@ -33,8 +33,8 @@ class KBEncoderTrainConfig(BaseModel):
     # The process of generating samples for KB is complex
     # and needs multiprocessing.
     # This is the number of workers used in Dataloader.
-    load_worker_num: int = 4
-    load_prefetch_per_worker: int = 10
+    load_worker_num: Optional[int] = 0
+    load_prefetch_per_worker: Optional[int] = 2
 
     base_type: str = "bert-base-uncased"
     base_configs: Dict[str, Any] = {}

@@ -4,7 +4,7 @@
             "accumulate_grad_batches": 32,
             "base_configs": {},
             "base_type": "bert-base-uncased",
-            "batch_size": 2,
+            "batch_size": 1,
             "context_length": 200,
             "dataset": "KDWD",
             "dataset_config": {
@@ -21,9 +21,7 @@
             "epochs": 200,
             "l2_regularization": 1e-5,
             "learning_rate": 5e-05,
-            "load": true,
-            "load_worker_num": 4,
-            "load_prefetch_per_worker": 10,
+            "load": false,
             "mlp_hidden_size": [],
             "optimizer_class": "Adam",
             "relation_mode": "subtraction",
@@ -36,7 +34,7 @@
     ],
     "early_stopping_patience": 100,
     "gpus": [
-        0
+        0,
     ],
     "pipeline": [
         "kb_encoder"
