@@ -8,18 +8,18 @@ from ..model.ext_vocab import ExtendVocabForQA
 from ..dataset.base import EmptyDataset, collate_function_dict_to_batch_encoding
 from ..dataset.qa.squad import SQuADDataset
 from ..utils.config import QATrainConfig
-from ..utils.settings import proxies, model_cache_dir
+from ..utils.settings import proxies, model_cache_dir, huggingface_mirror
 
 
 class QATrainer(pl.LightningModule):
-    def __init__(self, config: QATrainConfig):
+    def __init__(self, config: QATrainConfig, is_distributed=False):
         super().__init__()
         self.save_hyperparameters()
 
         np.random.seed(config.seed)
         t.random.manual_seed(config.seed)
         self.config = config
-
+        self.is_distributed = is_distributed
         self.kb_encoder = KBEncoderTrainer.load_from_checkpoint(
             config.kb_encoder_path, only_init_model=True
         ).kb_model
@@ -31,7 +31,10 @@ class QATrainer(pl.LightningModule):
             **config.base_configs,
         )
         self.qa_tokenizer = AutoTokenizer.from_pretrained(
-            config.base_type, cache_dir=model_cache_dir, proxies=proxies,
+            config.base_type,
+            cache_dir=model_cache_dir,
+            proxies=proxies,
+            mirror=huggingface_mirror,
         )
 
         initialized_datasets = {}
@@ -158,7 +161,7 @@ class QATrainer(pl.LightningModule):
         )
         metrics = self.validate_qa_dataset.validate(batch, out[1], out[2])
         for key, value in metrics.items():
-            self.log(key, value)
+            self.log(key, value, sync_dist=self.is_distributed)
 
     def configure_optimizers(self):
         optim_cls = getattr(t.optim, self.config.optimizer_class)

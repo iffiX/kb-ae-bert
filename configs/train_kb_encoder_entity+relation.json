@@ -3,25 +3,21 @@
         {
             "accumulate_grad_batches": 32,
             "base_configs": {},
-            "base_type": "bert-base-uncased",
-            "batch_size": 1,
+            "base_type": "bert-large-uncased",
+            "batch_size": 2,
             "context_length": 200,
             "dataset": "KDWD",
             "dataset_config": {
                 "force_reload": false,
                 "graph_depth": 1,
-                "local_root_path": null,
-                "mongo_docker_api_host": null,
-                "mongo_docker_host": "localhost",
-                "mongo_docker_name": "mongodb2",
-                "permute_seed": 0,
+                "permute_seed": 2147483647,
                 "train_entity_encode_ratio": 0.9,
                 "train_relation_encode_ratio": 0.9
             },
             "epochs": 200,
             "l2_regularization": 1e-5,
             "learning_rate": 5e-05,
-            "load": false,
+            "load": true,
             "mlp_hidden_size": [],
             "optimizer_class": "Adam",
             "relation_mode": "subtraction",
@@ -34,10 +30,10 @@
     ],
     "early_stopping_patience": 100,
     "gpus": [
-        0,
+        0, 1, 2, 3, 4, 5, 6, 7
     ],
     "pipeline": [
         "kb_encoder"
     ],
-    "working_directory": "/nfs/vdisk/workspace/kb-ae-bert/train_entity_and_relation"
+    "working_directory": "/root/data/workspace/kb-ae-bert/train_entity_and_relation"
 }

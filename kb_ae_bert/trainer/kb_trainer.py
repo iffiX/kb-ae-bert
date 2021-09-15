@@ -8,17 +8,20 @@ from ..model.kb_ae import KBMaskedLMEncoder
 from ..dataset.base import collate_function_dict_to_batch_encoding
 from ..dataset.kb.kdwd import KDWDBertDataset
 from ..utils.config import KBEncoderTrainConfig
-from ..utils.settings import proxies, model_cache_dir
+from ..utils.settings import proxies, model_cache_dir, huggingface_mirror
 
 
 class KBEncoderTrainer(pl.LightningModule):
-    def __init__(self, config: KBEncoderTrainConfig, only_init_model=False):
+    def __init__(
+        self, config: KBEncoderTrainConfig, is_distributed=False, only_init_model=False
+    ):
         super().__init__()
         self.save_hyperparameters()
 
         np.random.seed(config.seed)
         t.random.manual_seed(config.seed)
         self.config = config
+        self.is_distributed = is_distributed
         self.kb_model = KBMaskedLMEncoder(
             relation_size=config.relation_size,
             base_type=config.base_type,
@@ -28,7 +31,10 @@ class KBEncoderTrainer(pl.LightningModule):
         )
         if not only_init_model:
             self.kb_tokenizer = AutoTokenizer.from_pretrained(
-                config.base_type, cache_dir=model_cache_dir, proxies=proxies,
+                config.base_type,
+                cache_dir=model_cache_dir,
+                proxies=proxies,
+                mirror=huggingface_mirror,
             )
 
             if config.dataset == "KDWD":
@@ -141,7 +147,7 @@ class KBEncoderTrainer(pl.LightningModule):
                 token_type_ids=batch["token_type_ids"].to(self.device),
                 labels=batch["labels"].to(self.device),
             )
-            self.log("train_loss", out[1])
+            self.log("train_loss", out[1], sync_dist=self.is_distributed)
             return out[1]
         elif self.config.task == "relation":
             # Relation encoding training
@@ -153,7 +159,7 @@ class KBEncoderTrainer(pl.LightningModule):
                 token_type_ids=batch["token_type_ids"].to(self.device),
             )
             result = self.dataset.get_loss(batch, relation_logits)
-            self.log("train_loss", result[0] + result[1])
+            self.log("train_loss", result[0] + result[1], sync_dist=self.is_distributed)
             return result[0] + result[1]
         else:
             # entity + relation
@@ -170,7 +176,11 @@ class KBEncoderTrainer(pl.LightningModule):
                 token_type_ids=batch[1]["token_type_ids"].to(self.device),
             )
             result = self.dataset.get_loss(batch[1], relation_logits)
-            self.log("train_loss", out[1] + result[0] + result[1])
+            self.log(
+                "train_loss",
+                out[1] + result[0] + result[1],
+                sync_dist=self.is_distributed,
+            )
             return out[1] + result[0] + result[1]
 
     # noinspection PyTypeChecker
@@ -216,7 +226,7 @@ class KBEncoderTrainer(pl.LightningModule):
             }
 
         for key, value in metrics.items():
-            self.log(key, value)
+            self.log(key, value, sync_dist=self.is_distributed)
 
     def configure_optimizers(self):
         optim_cls = getattr(t.optim, self.config.optimizer_class)

@@ -4,7 +4,7 @@ from transformers import (
     AutoModelForTokenClassification,
     AutoTokenizer,
 )
-from ..utils.settings import model_cache_dir, proxies
+from ..utils.settings import model_cache_dir, proxies, huggingface_mirror
 from ..utils.token import get_context_of_masked
 import random
 import torch as t
@@ -42,10 +42,14 @@ class KBMaskedLMEncoder(nn.Module):
             proxies=proxies,
             output_hidden_states=True,
             return_dict=True,
+            mirror=huggingface_mirror,
             **base_configs,
         )
         tokenizer = AutoTokenizer.from_pretrained(
-            base_type, cache_dir=model_cache_dir, proxies={"http": proxies},
+            base_type,
+            cache_dir=model_cache_dir,
+            proxies={"http": proxies},
+            mirror=huggingface_mirror,
         )
         self._pad_id = tokenizer.pad_token_id
         self._mask_id = tokenizer.mask_token_id

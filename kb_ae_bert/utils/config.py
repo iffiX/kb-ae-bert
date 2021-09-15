@@ -8,10 +8,6 @@ class KDWDConfig(BaseModel):
     permute_seed: int = 0
     train_entity_encode_ratio: float = 0.9
     train_relation_encode_ratio: float = 0.9
-    local_root_path: str = None
-    mongo_docker_name: str = None
-    mongo_docker_host: str = "localhost"
-    mongo_docker_api_host: str = None
     force_reload: bool = False
 
 
@@ -19,8 +15,8 @@ class KBEncoderTrainConfig(BaseModel):
     load: bool = False
     seed: int = 0
     epochs: int = 100
-    train_steps: int = 320000
-    validate_steps: int = 100
+    train_steps: Optional[int] = None
+    validate_steps: Optional[int] = None
     batch_size: int = 2
     accumulate_grad_batches: int = 32
 
@@ -51,8 +47,8 @@ class QATrainConfig(BaseModel):
     load: bool = False
     seed: int = 0
     epochs: int = 100
-    train_steps: int = 320000
-    validate_steps: int = 100
+    train_steps: Optional[int] = None
+    validate_steps: Optional[int] = None
     batch_size: int = 2
     accumulate_grad_batches: int = 32
 
@@ -78,7 +74,7 @@ class Config(BaseModel):
     # Cuda ids of GPUs
     gpus: Optional[List[int]] = [0]
 
-    # Maximum train steps allowed before stopping
+    # Maximum validation epochs allowed before stopping
     # when monitored metric is not decreasing
     early_stopping_patience: int = 100
 

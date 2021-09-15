@@ -22,14 +22,11 @@ from kb_ae_bert.dataset.base import collate_function_dict_to_batch_encoding
 #     force_reload=True,
 # )
 kdwd = KDWDBertDataset(
+    graph_depth=1,
     context_length=200,
     sequence_length=512,
-    tokenizer=AutoTokenizer.from_pretrained("bert-base-uncased"),
+    tokenizer=AutoTokenizer.from_pretrained("bert-large-uncased"),
     relation_size=200,
-    local_root_path="/nfs/vdisk/AI/datasets",
-    mongo_docker_name="mongodb2",
-    mongo_docker_host="node1",
-    mongo_docker_api_host="tcp://node1:4243",
     generate_data=True,
 )
 # print(kdwd.relation_names)

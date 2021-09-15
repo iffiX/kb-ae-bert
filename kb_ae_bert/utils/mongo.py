@@ -1,5 +1,6 @@
 import os
 import subprocess
+import logging
 import pymongo as mon
 from typing import List, Union
 
@@ -19,8 +20,8 @@ from .docker import (
 
 def load_dataset_files(database: str, dataset_files_path: str, files: List[str]):
     for file in files:
-        _, ext = os.path.splitext(file)
-        file_name = os.path.basename(file)
+        file_name, ext = os.path.splitext(file)
+        logging.info(f"Importing collection {file_name}")
         if "csv" in ext:
             subprocess.run(
                 [
@@ -60,8 +61,8 @@ def load_dataset_files_to_docker(
     container: Container, database: str, dataset_files_path: str, files: List[str]
 ):
     for file in files:
-        _, ext = os.path.splitext(file)
-        file_name = os.path.basename(file)
+        file_name, ext = os.path.splitext(file)
+        logging.info(f"Importing collection {file_name}")
         if "csv" in ext:
             safe_exec_on_docker(
                 container,
@@ -98,7 +99,7 @@ def connect_to_database(
         uri = f"mongodb://{quote_plus(username)}:{quote_plus(password)}@{host}:{port}"
     else:
         uri = f"mongodb://{host}:{port}"
-    client = mon.MongoClient(uri, serverSelectionTimeoutMS=3000)
+    client = mon.MongoClient(uri, serverSelectionTimeoutMS=10000)
     return client.get_database(db_name)
 
 
@@ -126,6 +127,7 @@ class MongoDBHandler:
         self.is_docker = is_docker
 
         if is_docker:
+            logging.info("Initializing MongoDB using docker.")
             if mongo_docker_api_host is not None:
                 os.environ["DOCKER_HOST"] = mongo_docker_api_host
 
@@ -153,21 +155,34 @@ class MongoDBHandler:
                 ]
             )
         else:
+            logging.info("Initializing MongoDB using local binary.")
+            os.makedirs(mongo_local_path, exist_ok=True)
             self.mongo_local_path = mongo_local_path
             self.db_host = "localhost"
             self.db_port = 27017
-            self.db_process = subprocess.Popen(
-                [
-                    "mongod",
-                    "--dbpath",
-                    self.mongo_local_path,
-                    "--nojournal",
-                    "--bind_ip",
-                    "127.0.0.1",
-                    "--port",
-                    "27017",
-                ]
-            )
+            try:
+                client = mon.MongoClient(
+                    f"mongodb://localhost:27017", serverSelectionTimeoutMS=500
+                )
+                client.server_info()
+                self.db_process = None
+            except:
+                self.db_process = subprocess.Popen(
+                    [
+                        "mongod",
+                        "--dbpath",
+                        self.mongo_local_path,
+                        "--nojournal",
+                        "--bind_ip",
+                        "127.0.0.1",
+                        "--port",
+                        "27017",
+                        "--wiredTigerCacheSizeGB",
+                        "16",
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.STDOUT,
+                )
 
     def get_database(self, database):
         return connect_to_database(self.db_host, self.db_port, database)
@@ -206,5 +221,9 @@ class MongoDBHandler:
                         "127.0.0.1",
                         "--port",
                         "27017",
-                    ]
+                        "--wiredTigerCacheSizeGB",
+                        "16",
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.STDOUT,
                 )

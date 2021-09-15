@@ -16,6 +16,7 @@ ROOT = "/root/data/workspace/kb-ae-bert"
 # }  # type: Union[dict, None]
 
 proxies = None
+huggingface_mirror = None
 
 # kaggle_http_proxy = "http://localhost:1090"
 kaggle_http_proxy = None

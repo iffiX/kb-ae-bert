@@ -10,10 +10,6 @@
             "dataset_config": {
                 "force_reload": false,
                 "graph_depth": 1,
-                "local_root_path": null,
-                "mongo_docker_api_host": null,
-                "mongo_docker_host": "localhost",
-                "mongo_docker_name": "mongodb2",
                 "permute_seed": 0,
                 "train_entity_encode_ratio": 0.9,
                 "train_relation_encode_ratio": 0.9
@@ -34,10 +30,10 @@
     ],
     "early_stopping_patience": 100,
     "gpus": [
-        0,
+        0, 1, 2, 3
     ],
     "pipeline": [
         "kb_encoder"
     ],
-    "working_directory": "/nfs/vdisk/workspace/kb-ae-bert/train_entity"
+    "working_directory": "/data/workspace/kb-ae-bert/train_entity"
 }
