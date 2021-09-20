@@ -1,10 +1,9 @@
 from typing import List
 from transformers import (
     AutoModelForMaskedLM,
-    AutoModelForTokenClassification,
     AutoTokenizer,
 )
-from ..utils.settings import model_cache_dir, proxies, huggingface_mirror
+from ..utils.settings import model_cache_dir, proxies
 from ..utils.token import get_context_of_masked
 import random
 import torch as t
@@ -42,14 +41,10 @@ class KBMaskedLMEncoder(nn.Module):
             proxies=proxies,
             output_hidden_states=True,
             return_dict=True,
-            mirror=huggingface_mirror,
             **base_configs,
         )
         tokenizer = AutoTokenizer.from_pretrained(
-            base_type,
-            cache_dir=model_cache_dir,
-            proxies={"http": proxies},
-            mirror=huggingface_mirror,
+            base_type, cache_dir=model_cache_dir, proxies=proxies,
         )
         self._pad_id = tokenizer.pad_token_id
         self._mask_id = tokenizer.mask_token_id
@@ -166,59 +161,51 @@ class KBMaskedLMEncoder(nn.Module):
         batch_size = sentence_tokens.shape[0]
         sequence_length = sentence_tokens.shape[1]
         device = sentence_tokens.device
-        # generate masked context
-        # [batch_size * sequence_length, sequence_length]
-        sentence_tokens = (
-            sentence_tokens.unsqueeze(1)
-            .repeat(1, sequence_length, 1)
-            .flatten(start_dim=0, end_dim=1)
-        )
-        mask_position = t.arange(sequence_length, dtype=t.long, device=device).repeat(
-            batch_size
-        )
-        masked_context = get_context_of_masked(
-            sentence_tokens=sentence_tokens,
-            mask_position=mask_position,
-            context_length=context_length,
-            mask_id=self._mask_id,
-            pad_id=self._pad_id,
-        )
 
-        # generate input
-        cls_ = t.full(
-            [batch_size * sequence_length, 1],
-            self._cls_id,
-            dtype=t.long,
-            device=device,
-        )
-        sep = t.full(
-            [batch_size * sequence_length, 1],
-            self._sep_id,
-            dtype=t.long,
-            device=device,
-        )
-        mask_pad = t.full(
-            [
-                batch_size * sequence_length,
-                self._input_sequence_length - 3 - context_length,
-            ],
-            self._sep_id,
-            dtype=t.long,
-            device=device,
-        )
-        input_tokens = t.cat((cls_, masked_context, sep, mask_pad, sep), dim=1)
-        with_gradient_indexes = random.sample(
-            range(input_tokens.shape[0]), with_gradient_num * batch_size
-        )
-        cls_list = []
-        for i in range(input_tokens.shape[0]):
-            if i in with_gradient_indexes:
-                cls = self.__call__(input_tokens[i].unsqueeze(0))[0]
-            else:
-                with t.no_grad():
-                    cls = self.__call__(input_tokens[i].unsqueeze(0))[0]
-            cls_list.append(cls)
-        return t.cat(cls_list, dim=0).view(batch_size, sequence_length, -1)
+        # generate masked context
+        result = []
+        for sentence in sentence_tokens:
+            # find first sep
+            end = sentence.cpu().tolist().index(self._sep_id)
+            length = end - 1
+            mask_position = t.arange(length, dtype=t.long, device=device)
+            _, masked_context = get_context_of_masked(
+                sentence_tokens=sentence[1:end].unsqueeze(0).repeat(length, 1),
+                mask_position=mask_position,
+                context_length=context_length,
+                mask_id=self._mask_id,
+                pad_id=self._pad_id,
+            )
+
+            # generate input
+            cls_ = t.full([length, 1], self._cls_id, dtype=t.long, device=device,)
+            sep = t.full([length, 1], self._sep_id, dtype=t.long, device=device,)
+            mask_pad = t.full(
+                [length, self._input_sequence_length - 3 - context_length,],
+                self._sep_id,
+                dtype=t.long,
+                device=device,
+            )
+            input_tokens = t.cat((cls_, masked_context, sep, mask_pad, sep), dim=1)
+            with_gradient_indexes = random.sample(
+                range(input_tokens.shape[0]), with_gradient_num * batch_size
+            )
+            embedding_list = []
+            for i in range(input_tokens.shape[0]):
+                if i in with_gradient_indexes:
+                    embedding = self.__call__(input_tokens[i].unsqueeze(0))[0]
+                else:
+                    with t.no_grad():
+                        embedding = self.__call__(input_tokens[i].unsqueeze(0))[0]
+                embedding_list.append(embedding)
+            pad = t.zeros_like(embedding_list[0])
+            embedding_list = (
+                [pad]
+                + embedding_list
+                + [pad] * (sequence_length - len(embedding_list) - 1)
+            )
+            result.append(t.cat(embedding_list, dim=0).view(1, sequence_length, -1))
+        return t.cat(result, dim=0).view(batch_size, sequence_length, -1)
 
     def forward(self, tokens, attention_mask=None, token_type_ids=None, labels=None):
         """
@@ -265,51 +252,5 @@ class KBMaskedLMEncoder(nn.Module):
         return (
             out.hidden_states[-1][:, 0, :],
             None if labels is None else out.loss,
-            out.logits,
-        )
-
-
-class KBEntityDetector(nn.Module):
-    def __init__(
-        self, base_type: str = "bert-base-uncased", **base_configs,
-    ):
-        """
-        For entity detection.
-
-        Args:
-            base_type: Base type of model used to initialize the AutoModel.
-            **base_configs: Additional configs passed to AutoModel.
-        """
-        super().__init__()
-        self.base = AutoModelForTokenClassification.from_pretrained(
-            base_type,
-            cache_dir=model_cache_dir,
-            proxies=proxies,
-            return_dict=True,
-            num_labels=2,
-            **base_configs,
-        )
-
-    def forward(self, tokens, proposal_labels=None):
-        """
-        Args:
-            tokens: Token ids, LongTensor of shape (batch_size, sequence_length)
-            proposal_labels: Output proposal labels, 1 indicates that the input token
-                is the target entity (masked in input). LongTensor
-                of shape (batch_size, sequence_length)
-        Returns:
-            proposal: LongTensor of shape (batch_size, sequence_length)
-            loss: CrossEntropyLoss of predicted proposals and given proposals,
-                None if `proposal_labels` is not set, otherwise a float tensor
-                of shape (1,).
-            logits: Prediction scores of the language modeling head
-                (scores for each vocabulary token before SoftMax),
-                FloatTensor of shape (batch_size, sequence_length, 2),
-        """
-        out = self.base(input_ids=tokens, token_type_ids=proposal_labels)
-
-        return (
-            t.argmax(out.logits, dim=2),
-            None if proposal_labels is None else out.loss,
             out.logits,
         )

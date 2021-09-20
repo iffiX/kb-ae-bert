@@ -5,19 +5,21 @@
             "base_configs": {},
             "base_type": "bert-large-uncased",
             "batch_size": 2,
-            "context_length": 200,
+            "context_length": 64,
             "dataset": "KDWD",
             "dataset_config": {
                 "force_reload": false,
                 "graph_depth": 1,
                 "permute_seed": 2147483647,
                 "train_entity_encode_ratio": 0.9,
-                "train_relation_encode_ratio": 0.9
+                "train_relation_encode_ratio": 0.9,
+                "relation_mask_mode": "part"
             },
             "epochs": 200,
             "l2_regularization": 1e-5,
             "learning_rate": 5e-05,
             "load": true,
+            "max_seq_length": 128,
             "mlp_hidden_size": [],
             "optimizer_class": "Adam",
             "relation_mode": "subtraction",
@@ -30,10 +32,10 @@
     ],
     "early_stopping_patience": 100,
     "gpus": [
-        0, 1, 2, 3, 4, 5, 6, 7
+        0, 1, 2, 3
     ],
     "pipeline": [
         "kb_encoder"
     ],
-    "working_directory": "/root/data/workspace/kb-ae-bert/train_entity_and_relation"
+    "working_directory": "/data/workspace/kb-ae-bert/train_entity_and_relation_128"
 }

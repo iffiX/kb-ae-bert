@@ -51,6 +51,7 @@ class KDWDBertDataset:
         entity_number: int = 1000000,
         relation_mask_mode: str = "random",
         relation_mask_random_probability: float = 0.15,
+        sub_process_init: dict = None,
     ):
         """
         Note:
@@ -61,7 +62,7 @@ class KDWDBertDataset:
                 relations will be treated as "Unknown relation".
             context_length: Length of context tokens, should be smaller than
                 sequence_length, 1/2 of it is recommended.
-            sequence_length: Length of the output sequence to model.
+            sequence_length: length of output sequence.
             tokenizer: Tokenizer to use.
             graph_depth: Maximum depth of the BFS algorithm used to generate the graph
                 of relations starting from the target entity.
@@ -81,6 +82,10 @@ class KDWDBertDataset:
             relation_mask_random_probability: Masking probability when using the
                 "random" mode.
         """
+        self.unknown_relation_id = 0
+        self.sub_part_relation_id = 1
+        self.relation_index_start = 2
+
         self.relation_size = relation_size
         self.context_length = context_length
         self.sequence_length = sequence_length
@@ -97,50 +102,57 @@ class KDWDBertDataset:
         self.relation_mask_random_probability = relation_mask_random_probability
 
         assert relation_mask_mode in ("part", "random")
+        if sequence_length > tokenizer.model_max_length:
+            raise ValueError(
+                f"Sequence length {sequence_length} is larger than "
+                f"max allowed length {tokenizer.model_max_length}"
+            )
 
         self.db = self.mongo_db_handler.get_database("kdwd")
-        collection_names = self.db.list_collection_names()
-        is_db_reusable = (
-            "item" in collection_names
-            and "statements" in collection_names
-            and "page" in collection_names
-            and "link_annotated_text" in collection_names
-        )
-        if not is_db_reusable or force_reload:
-            kaggle_path = str(os.path.join(dataset_cache_dir, "kaggle"))
 
-            # load dataset into the database
-            logging.info(
-                f"Existing collections are {collection_names}, "
-                f"required are: item, statements, page, link_annotated_text, "
-                f"regenerating."
+        if sub_process_init is None:
+            collection_names = self.db.list_collection_names()
+            is_db_reusable = (
+                "item" in collection_names
+                and "statements" in collection_names
+                and "page" in collection_names
+                and "link_annotated_text" in collection_names
             )
-            download_dataset(
-                "kenshoresearch/kensho-derived-wikimedia-data", kaggle_path
-            )
+            if not is_db_reusable or force_reload:
+                kaggle_path = str(os.path.join(dataset_cache_dir, "kaggle"))
 
-            # we don't load statements.csv as we need to preprocess it
-            self.mongo_db_handler.load_dataset_files(
-                "kdwd",
-                str(os.path.join(kaggle_path, "kensho-derived-wikimedia-data")),
-                [
-                    "item.csv",
-                    "item_aliases.csv",
-                    "link_annotated_text.jsonl",
-                    "page.csv",
-                    "property.csv",
-                    "property_aliases.csv",
-                ],
-            )
-
-            self.insert_statements_with_pages(
-                os.path.join(
-                    kaggle_path, "kensho-derived-wikimedia-data", "statements.csv",
+                # load dataset into the database
+                logging.info(
+                    f"Existing collections are {collection_names}, "
+                    f"required are: item, statements, page, link_annotated_text, "
+                    f"regenerating."
                 )
-            )
+                download_dataset(
+                    "kenshoresearch/kensho-derived-wikimedia-data", kaggle_path
+                )
+
+                # we don't load statements.csv as we need to preprocess it
+                self.mongo_db_handler.load_dataset_files(
+                    "kdwd",
+                    str(os.path.join(kaggle_path, "kensho-derived-wikimedia-data")),
+                    [
+                        "item.csv",
+                        "item_aliases.csv",
+                        "link_annotated_text.jsonl",
+                        "page.csv",
+                        "property.csv",
+                        "property_aliases.csv",
+                    ],
+                )
+
+                self.insert_statements_with_pages(
+                    os.path.join(
+                        kaggle_path, "kensho-derived-wikimedia-data", "statements.csv",
+                    )
+                )
 
             # create necessary indexes
-            logging.info("Creating indexes, this operation will take a LONG time!")
+            logging.info("Creating indexes.")
             self.db.item.create_index([("item_id", ASCENDING)])
             self.db.statements.create_index([("source_item_id", ASCENDING)])
             self.db.statements.create_index([("target_item_id", ASCENDING)])
@@ -151,61 +163,78 @@ class KDWDBertDataset:
                 [("sections.target_page_ids", ASCENDING)]
             )
             self.db.link_annotated_text.create_index([("page_id", ASCENDING)])
-
             logging.info("Indexes created.")
 
-        self.unknown_relation_id = 0
-        self.sub_part_relation_id = 1
-        self.relation_index_start = 2
-
-        # Generate states cache
-        if os.path.exists(
-            os.path.join(preprocess_cache_dir, f"{self.CACHE_NAME}.cache")
-        ):
-            logging.info("Found states cache for KDWD, skipping generation.")
-            is_cache_reusable, info = self.restore(
+            # Generate states cache
+            if os.path.exists(
                 os.path.join(preprocess_cache_dir, f"{self.CACHE_NAME}.cache")
-            )
+            ):
+                logging.info("Found states cache for KDWD, skipping generation.")
+                is_cache_reusable, info = self.restore(
+                    os.path.join(preprocess_cache_dir, f"{self.CACHE_NAME}.cache")
+                )
+                if not is_cache_reusable:
+                    logging.info(info)
+            else:
+                logging.info("States cache for KDWD not found, generating.")
+                is_cache_reusable = False
+
             if not is_cache_reusable:
-                logging.info(info)
+                # relations
+                self.relation_names = ["<unknown relation>", "<is a sub token of>"]
+                # maps property id in statements to a relation id
+                self.property_to_relation_mapping = {}
+                logging.info("Selecting relations by usage.")
+                self.select_relations()
+
+                # generate train/validate splits
+                # Dict["split_name: str", List[Tuple["page_id: int", "item_id: int"]]]
+                self.entity_encode_splits = {}
+                # Dict["split_name: str",
+                # List[Tuple["source_item_id: int",
+                #            "target_item_id: int",
+                #            "property_id: int"]]]
+                self.relation_encode_splits = {}
+
+                logging.info("Generating splits.")
+                self.generate_split_for_entity_encode()
+                self.generate_split_for_relation_encode()
+
+                self.save(
+                    os.path.join(preprocess_cache_dir, f"{self.CACHE_NAME}.cache")
+                )
+
+            # close connection to db and data file, reopen it later, to support forking
+            self.db = None
+            self.entity_file = None
+            self.relation_file = None
+
+            # Generate data
+            self.is_entity_data_generated = False
+            self.is_relation_data_generated = False
+            if generate_data:
+                # self.open_db()
+                # logging.info("Preheating database.")
+                # for _ in self.db.link_annotated_text.find({}, {"_id": 1}):
+                #     continue
+                # logging.info("Preheating finished.")
+                # self.db = None
+                self.generate_data(force_generate=not is_cache_reusable)
+
         else:
-            logging.info("States cache for KDWD not found, generating.")
-            is_cache_reusable = False
+            logging.info("Subprocess worker started.")
+            self.property_to_relation_mapping = sub_process_init[
+                "property_to_relation_mapping"
+            ]
+            self.relation_names = sub_process_init["relation_names"]
 
-        if not is_cache_reusable:
-            # relations
-            self.relation_names = ["<unknown relation>", "<is a sub token of>"]
-            # maps property id in statements to a relation id
-            self.property_to_relation_mapping = {}
-            logging.info("Selecting relations by usage.")
-            self.select_relations()
+            self.db = None
+            self.entity_file = None
+            self.relation_file = None
 
-            # generate train/validate splits
-            # Dict["split_name: str", List[Tuple["page_id: int", "item_id: int"]]]
-            self.entity_encode_splits = {}
-            # Dict["split_name: str",
-            # List[Tuple["source_item_id: int",
-            #            "target_item_id: int",
-            #            "property_id: int"]]]
-            self.relation_encode_splits = {}
-
-            logging.info("Generating splits.")
-            self.generate_split_for_entity_encode()
-            self.generate_split_for_relation_encode()
-
-            self.save(os.path.join(preprocess_cache_dir, f"{self.CACHE_NAME}.cache"))
-
-        # close connection to db and data file, reopen it later, to support forking
-        self.db = None
-        self.entity_file = None
-        self.relation_file = None
-
-        # Generate data
-        self.is_entity_data_generated = False
-        self.is_relation_data_generated = False
-        self.generate_data(
-            generate_data=generate_data, force_generate=not is_cache_reusable
-        )
+            # Generate data
+            self.is_entity_data_generated = False
+            self.is_relation_data_generated = False
 
     @staticmethod
     def get_loss(batch, relation_logits):
@@ -529,7 +558,17 @@ class KDWDBertDataset:
                 f"Cannot create graph for page_id={page_id}, item_id={item_id}"
             )
         graph = graph["graph"]
-        graph = sorted(graph, key=lambda e: e["depth"])
+
+        # Double key sorting, first sorted by depth, then sort by relation popularity
+        # Discard unknown relations due to limited relation space
+        graph = sorted(
+            graph,
+            key=lambda e: (
+                e["depth"],
+                self.property_to_relation_mapping[e["edge_property_id"]]
+                == self.unknown_relation_id,
+            ),
+        )
 
         node_label_mapping = {}
 
@@ -842,7 +881,7 @@ class KDWDBertDataset:
             f"validate={len(self.relation_encode_splits['validate'])}"
         )
 
-    def generate_data(self, generate_data=True, force_generate=False):
+    def generate_data(self, force_generate=False):
         # generate entity data
         entity_file_path = os.path.join(
             preprocess_cache_dir, f"{self.CACHE_NAME}_entity_data.hdf5"
@@ -869,7 +908,7 @@ class KDWDBertDataset:
                     logging.info("Found entity data for KDWD, skipping generation.")
                     generate_entity_data = False
 
-        if generate_data and generate_entity_data:
+        if generate_entity_data:
             with h5py.File(entity_file_path, "w", rdcc_nbytes=1024 ** 3,) as file:
                 self.generate_preprocessed_data_of_entity_encode(file)
 
@@ -899,7 +938,7 @@ class KDWDBertDataset:
                     logging.info("Found relation data for KDWD, skipping generation.")
                     generate_relation_data = False
 
-        if generate_data and generate_relation_data:
+        if generate_relation_data:
             with h5py.File(
                 entity_file_path, "r", rdcc_nbytes=1024 ** 3,
             ) as entity_file, h5py.File(
@@ -915,7 +954,7 @@ class KDWDBertDataset:
         train_set = list(enumerate(self.entity_encode_splits["train"]))
         validate_set = list(enumerate(self.entity_encode_splits["validate"]))
         total_num = len(train_set) + len(validate_set)
-        ctx = mp.get_context("fork")
+        ctx = mp.get_context("spawn")
 
         logging.info(
             f"Generating entity encoding dataset, size: "
@@ -1139,10 +1178,14 @@ class KDWDBertDataset:
                 self.train_entity_encode_ratio,
                 self.train_relation_encode_ratio,
                 self.force_reload,
-                # Disable generating data in subprocess, throw exception directly
+                # Disable generating data in subprocess
                 False,
                 self.entity_number,
                 self.relation_mask_mode,
                 self.relation_mask_random_probability,
+                {
+                    "property_to_relation_mapping": self.property_to_relation_mapping,
+                    "relation_names": self.relation_names,
+                },
             ),
         )

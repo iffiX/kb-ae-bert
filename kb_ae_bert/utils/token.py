@@ -143,7 +143,7 @@ def get_context_of_masked(
 
     right_context_length = t.randint(
         low=0, high=context_length, size=(batch_size,), generator=generator
-    )
+    ).to(sentence_tokens.device)
     left_context_length = context_length - 1 - right_context_length
     index = (mask_position + right_context_length).unsqueeze(-1).repeat(
         1, context_length

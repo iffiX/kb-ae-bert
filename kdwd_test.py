@@ -23,18 +23,19 @@ from kb_ae_bert.dataset.base import collate_function_dict_to_batch_encoding
 # )
 kdwd = KDWDBertDataset(
     graph_depth=1,
-    context_length=200,
-    sequence_length=512,
+    context_length=32,
+    sequence_length=64,
     tokenizer=AutoTokenizer.from_pretrained("bert-large-uncased"),
     relation_size=200,
     generate_data=True,
+    relation_mask_mode="part",
 )
 # print(kdwd.relation_names)
 
 
 def x():
-    for i in range(100):
-        kdwd.print_sample_of_relation_encode(split="train")
+    kdwd.print_sample_of_entity_encode(split="train")
+    kdwd.print_sample_of_relation_encode(split="train")
 
 
 if __name__ == "__main__":

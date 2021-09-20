@@ -49,6 +49,9 @@ if __name__ == "__main__":
             elif stage == "kb_encoder":
                 config.pipeline.append(stage)
                 config.configs.append(KBEncoderTrainConfig())
+            elif stage == "glue":
+                config.pipeline.append(stage)
+                config.configs.append(GLUETrainConfig())
             else:
                 raise ValueError(f"Unknown stage {stage}")
 

@@ -17,22 +17,16 @@ from kb_ae_bert.utils.settings import (
 
 class SQuADDataset(QADataset):
     def __init__(
-        self,
-        tokenizer: PreTrainedTokenizerBase,
-        dataset_path: str = "squad",
-        local_root_path: str = None,
+        self, tokenizer: PreTrainedTokenizerBase, dataset_path: str = "squad",
     ):
-        local_root_path = local_root_path or str(
-            os.path.join(dataset_cache_dir, "huggingface")
-        )
+        huggingface_path = str(os.path.join(dataset_cache_dir, "huggingface"))
 
         self.tokenizer = tokenizer
         self.dataset_path = dataset_path
-        self.local_root_path = local_root_path
 
         self.dataset = load_dataset(
             path=dataset_path,
-            cache_dir=local_root_path,
+            cache_dir=huggingface_path,
             download_config=DownloadConfig(proxies=proxies),
         )
 
@@ -73,7 +67,12 @@ class SQuADDataset(QADataset):
     def validate_dataset(self):
         return StaticMapDataset(self._validate)
 
-    def validate(self, batch, start_logits, end_logits):
+    def validate(
+        self,
+        batch: BatchEncoding,
+        start_logits: t.FloatTensor,
+        end_logits: t.FloatTensor,
+    ):
         predictions = []
         references = []
         for index, input_ids, start_l, end_l in zip(

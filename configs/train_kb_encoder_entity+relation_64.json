@@ -1,31 +1,31 @@
 {
     "configs": [
         {
-            "accumulate_grad_batches": 16,
+            "accumulate_grad_batches": 4,
             "base_configs": {},
             "base_type": "bert-large-uncased",
-            "batch_size": 2,
-            "context_length": 200,
+            "batch_size": 8,
+            "context_length": 32,
             "dataset": "KDWD",
             "dataset_config": {
                 "force_reload": false,
                 "graph_depth": 1,
-                "permute_seed": 0,
+                "permute_seed": 2147483647,
                 "train_entity_encode_ratio": 0.9,
                 "train_relation_encode_ratio": 0.9,
-                "relation_mask_mode": "random"
+                "relation_mask_mode": "part"
             },
-            "epochs": 20,
-            "l2_regularization": 0,
+            "epochs": 5,
+            "l2_regularization": 1e-5,
             "learning_rate": 5e-05,
             "load": true,
-            "max_seq_length": 512,
+            "max_seq_length": 64,
             "mlp_hidden_size": [],
             "optimizer_class": "Adam",
             "relation_mode": "subtraction",
             "relation_size": 200,
             "seed": 0,
-            "task": "entity",
+            "task": "entity+relation",
             "train_steps": 9000,
             "validate_steps": 1000
         }
@@ -37,5 +37,5 @@
     "pipeline": [
         "kb_encoder"
     ],
-    "working_directory": "/data/workspace/kb-ae-bert/train_entity"
+    "working_directory": "/data/workspace/kb-ae-bert/train_entity_and_relation_64"
 }

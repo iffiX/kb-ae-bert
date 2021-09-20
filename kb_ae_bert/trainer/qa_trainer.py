@@ -12,13 +12,16 @@ from ..utils.settings import proxies, model_cache_dir, huggingface_mirror
 
 
 class QATrainer(pl.LightningModule):
-    def __init__(self, config: QATrainConfig, is_distributed=False):
+    def __init__(
+        self, config: QATrainConfig, stage_result_path="./", is_distributed=False
+    ):
         super().__init__()
         self.save_hyperparameters()
 
         np.random.seed(config.seed)
         t.random.manual_seed(config.seed)
         self.config = config
+        self.stage_result_path = stage_result_path
         self.is_distributed = is_distributed
         self.kb_encoder = KBEncoderTrainer.load_from_checkpoint(
             config.kb_encoder_path, only_init_model=True

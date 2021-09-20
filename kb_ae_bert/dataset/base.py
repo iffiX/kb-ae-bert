@@ -1,5 +1,5 @@
 import torch as t
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Union, Any
 from torch.utils.data import Dataset, IterableDataset
 from transformers import BatchEncoding
 
@@ -66,7 +66,14 @@ class EmptyDataset(Dataset):
         return 0
 
 
-def collate_function_dict_to_batch_encoding(samples: List[Dict[str, t.Tensor]]):
+class MovableList(list):
+    def to(self, *args, **kwargs):
+        return self
+
+
+def collate_function_dict_to_batch_encoding(
+    samples: List[Union[BatchEncoding, Dict[str, Any]]]
+):
     assert isinstance(samples, list)
     assert len(samples) > 0
     keys = set(samples[0].keys())
@@ -77,5 +84,22 @@ def collate_function_dict_to_batch_encoding(samples: List[Dict[str, t.Tensor]]):
 
     result = {}
     for k in keys:
-        result[k] = t.cat([s[k] for s in samples], dim=0)
+        data_list = MovableList()
+        data_list.extend([s[k] for s in samples])
+        if t.is_tensor(data_list[0]):
+            result[k] = t.cat(data_list, dim=0)
+        else:
+            if isinstance(data_list[0], int):
+                result[k] = t.tensor(data_list, dtype=t.int64)
+            elif isinstance(data_list[0], float):
+                result[k] = t.tensor(data_list, dtype=t.float32)
+            elif isinstance(data_list[0], list):
+                if isinstance(data_list[0][0], int):
+                    result[k] = t.tensor(data_list, dtype=t.int64)
+                elif isinstance(data_list[0][0], float):
+                    result[k] = t.tensor(data_list, dtype=t.float32)
+                else:
+                    result[k] = data_list
+            else:
+                result[k] = data_list
     return BatchEncoding(data=result)

@@ -4,8 +4,10 @@ import pytorch_lightning as pl
 from ..utils.config import *
 from .kb_trainer import KBEncoderTrainer
 from .qa_trainer import QATrainer
+from .glue_trainer import GLUETrainer
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.plugins import DDPPlugin
 
 
 def find_checkpoint(config, stage_index):
@@ -33,16 +35,25 @@ def train(config: Config):
             config.working_directory, str(stage_index), "checkpoint"
         )
         log_path = os.path.join(config.working_directory, str(stage_index), "log")
+        stage_result_path = os.path.join(
+            config.working_directory, str(stage_index), "result"
+        )
 
-        if stage not in ("kb_encoder", "qa"):
+        if stage not in ("kb_encoder", "qa", "glue"):
             raise ValueError(f"Unknown stage {stage}")
 
         if stage == "kb_encoder":
             stage_trainer = KBEncoderTrainer(
-                stage_config, is_distributed=is_distributed
+                stage_config, stage_result_path, is_distributed=is_distributed,
             )
         elif stage == "qa":
-            stage_trainer = QATrainer(stage_config, is_distributed=is_distributed)
+            stage_trainer = QATrainer(
+                stage_config, stage_result_path, is_distributed=is_distributed
+            )
+        elif stage == "glue":
+            stage_trainer = GLUETrainer(
+                stage_config, stage_result_path, is_distributed=is_distributed
+            )
         else:
             raise ValueError(f"Unknown stage {stage}.")
 
@@ -77,11 +88,12 @@ def train(config: Config):
 
         trainer = pl.Trainer(
             gpus=config.gpus,
-            accelerator="ddp" if len(config.gpus) > 0 else None,
+            accelerator="ddp" if len(config.gpus) > 1 else None,
+            plugins=[DDPPlugin(find_unused_parameters=False)],
             callbacks=[checkpoint_callback, early_stopping],
             logger=[t_logger],
-            limit_train_batches=stage_config.train_steps or 1.0,
-            limit_val_batches=stage_config.validate_steps or 1.0,
+            limit_train_batches=getattr(stage_config, "train_steps", None) or 1.0,
+            limit_val_batches=getattr(stage_config, "validate_steps", None) or 1.0,
             max_epochs=stage_config.epochs,
             # # For iterable datasets, to validate after each epoch,
             # # set check interval equal to number of training steps.
@@ -90,3 +102,4 @@ def train(config: Config):
             resume_from_checkpoint=checkpoint,
         )
         trainer.fit(stage_trainer)
+        trainer.test(stage_trainer, verbose=True)

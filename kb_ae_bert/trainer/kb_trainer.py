@@ -8,12 +8,16 @@ from ..model.kb_ae import KBMaskedLMEncoder
 from ..dataset.base import collate_function_dict_to_batch_encoding
 from ..dataset.kb.kdwd import KDWDBertDataset
 from ..utils.config import KBEncoderTrainConfig
-from ..utils.settings import proxies, model_cache_dir, huggingface_mirror
+from ..utils.settings import proxies, model_cache_dir
 
 
 class KBEncoderTrainer(pl.LightningModule):
     def __init__(
-        self, config: KBEncoderTrainConfig, is_distributed=False, only_init_model=False
+        self,
+        config: KBEncoderTrainConfig,
+        stage_result_path="./",
+        is_distributed=False,
+        only_init_model=False,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -21,6 +25,7 @@ class KBEncoderTrainer(pl.LightningModule):
         np.random.seed(config.seed)
         t.random.manual_seed(config.seed)
         self.config = config
+        self.stage_result_path = stage_result_path
         self.is_distributed = is_distributed
         self.kb_model = KBMaskedLMEncoder(
             relation_size=config.relation_size,
@@ -31,17 +36,14 @@ class KBEncoderTrainer(pl.LightningModule):
         )
         if not only_init_model:
             self.kb_tokenizer = AutoTokenizer.from_pretrained(
-                config.base_type,
-                cache_dir=model_cache_dir,
-                proxies=proxies,
-                mirror=huggingface_mirror,
+                config.base_type, cache_dir=model_cache_dir, proxies=proxies,
             )
 
             if config.dataset == "KDWD":
                 self.dataset = KDWDBertDataset(
                     relation_size=config.relation_size,
                     context_length=config.context_length,
-                    sequence_length=self.kb_tokenizer.model_max_length,
+                    sequence_length=config.max_seq_length,
                     tokenizer=self.kb_tokenizer,
                     **config.dataset_config.dict(),
                 )
@@ -134,7 +136,8 @@ class KBEncoderTrainer(pl.LightningModule):
                         self.dataset.validate_relation_encode_dataset,
                     )
                 ],
-                "max_size_cycle",
+                "min_size",
+                # "max_size_cycle",
             )
 
     # noinspection PyTypeChecker
@@ -180,6 +183,16 @@ class KBEncoderTrainer(pl.LightningModule):
                 "train_loss",
                 out[1] + result[0] + result[1],
                 sync_dist=self.is_distributed,
+                prog_bar=True,
+            )
+            self.log(
+                "entity_loss", out[1], sync_dist=self.is_distributed, prog_bar=True,
+            )
+            self.log(
+                "relation_loss",
+                result[0] + result[1],
+                sync_dist=self.is_distributed,
+                prog_bar=True,
             )
             return out[1] + result[0] + result[1]
 

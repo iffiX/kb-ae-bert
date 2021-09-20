@@ -7,8 +7,8 @@ from typing import Union
 # ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir)
 # ROOT = "/nfs/vdisk/workspace/kb-ae-bert"
 
-ROOT = "/root/data/workspace/kb-ae-bert"
-
+# ROOT = "/root/data/workspace/kb-ae-bert"
+ROOT = "/data/workspace/kb-ae-bert"
 # in requests format
 # proxies = {
 #     "http": "http://localhost:1090",
