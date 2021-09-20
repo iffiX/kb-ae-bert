@@ -1,11 +1,13 @@
 import os
 import itertools
+import warnings
 import numpy as np
 import torch as t
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader
-from torch.distributed import gather_object, get_rank, get_world_size
+from torch.distributed import all_gather_object, get_rank, get_world_size
 from transformers import AutoTokenizer, BatchEncoding
+from pytorch_lightning.utilities import rank_zero_only
 from .kb_trainer import KBEncoderTrainer
 from ..model.ext_vocab import ExtendVocabForSequenceClassification
 from ..dataset.base import collate_function_dict_to_batch_encoding
@@ -19,8 +21,8 @@ class GLUETrainer(pl.LightningModule):
         self, config: GLUETrainConfig, stage_result_path="./", is_distributed=False
     ):
         super().__init__()
-        os.environ["PL_TORCH_DISTRIBUTED_BACKEND"] = "gloo"
         self.save_hyperparameters()
+        warnings.filterwarnings("ignore")
 
         np.random.seed(config.seed)
         t.random.manual_seed(config.seed)
@@ -28,9 +30,11 @@ class GLUETrainer(pl.LightningModule):
         self.stage_result_path = stage_result_path
         self.is_distributed = is_distributed
 
-        self.kb_encoder = KBEncoderTrainer.load_from_checkpoint(
-            config.kb_encoder_path, only_init_model=True
-        ).kb_model
+        self.kb_encoder = [
+            KBEncoderTrainer.load_from_checkpoint(
+                config.kb_encoder_path, only_init_model=True
+            ).kb_model
+        ]
 
         self.glue_tokenizer = AutoTokenizer.from_pretrained(
             config.base_type,
@@ -54,6 +58,7 @@ class GLUETrainer(pl.LightningModule):
             num_labels=self.dataset.num_labels,
             **config.base_configs,
         )
+        self.kb_moved = False
 
     @property
     def monitor(self):
@@ -93,23 +98,27 @@ class GLUETrainer(pl.LightningModule):
 
     # noinspection PyTypeChecker
     def training_step(self, batch: BatchEncoding, batch_idx):
+        if not self.kb_moved:
+            self.kb_encoder[0] = self.kb_encoder[0].to(self.device)
+            kb_moved = True
         with_gradient_num = (
             0
             if not self.config.kb_encoder_trainable
             else self.config.kb_encoder_with_gradient_num
         )
-        kb_embeds = self.kb_encoder.compute_sentence_embeds(
-            sentence_tokens=batch["input_ids"].to(self.device),
-            context_length=self.config.context_length,
-            with_gradient_num=with_gradient_num,
-        )
-        extend_tokens = t.where(
-            (batch["input_ids"] != self.glue_tokenizer.cls_token_id)
-            & (batch["input_ids"] != self.glue_tokenizer.sep_token_id)
-            & (batch["input_ids"] != self.glue_tokenizer.pad_token_id),
-            1,
-            0,
-        )
+        with t.no_grad():
+            kb_embeds = self.kb_encoder[0].compute_sentence_embeds(
+                sentence_tokens=batch["input_ids"].to(self.device),
+                context_length=self.config.context_length,
+                with_gradient_num=with_gradient_num,
+            )
+            extend_tokens = t.where(
+                (batch["input_ids"] != self.glue_tokenizer.cls_token_id)
+                & (batch["input_ids"] != self.glue_tokenizer.sep_token_id)
+                & (batch["input_ids"] != self.glue_tokenizer.pad_token_id),
+                1,
+                0,
+            )
         out = self.glue_model(
             token_ids=batch["input_ids"].to(self.device),
             extend_embeds=kb_embeds,
@@ -122,7 +131,10 @@ class GLUETrainer(pl.LightningModule):
 
     # noinspection PyTypeChecker
     def validation_step(self, batch: BatchEncoding, _batch_idx):
-        kb_embeds = self.kb_encoder.compute_sentence_embeds(
+        if not self.kb_moved:
+            self.kb_encoder[0] = self.kb_encoder[0].to(self.device)
+            kb_moved = True
+        kb_embeds = self.kb_encoder[0].compute_sentence_embeds(
             sentence_tokens=batch["input_ids"].to(self.device),
             context_length=self.config.context_length,
             with_gradient_num=0,
@@ -146,23 +158,35 @@ class GLUETrainer(pl.LightningModule):
 
     def validation_epoch_end(self, outputs):
         if self.is_distributed:
-            gathered_outputs = [None] * get_world_size() if get_rank() == 0 else None
-            gather_object(outputs, object_gather_list=gathered_outputs, dst=0)
-            if gathered_outputs is not None:
-                gathered_outputs = list(itertools.chain.from_iterable(gathered_outputs))
-                self.validate_on_main_process(gathered_outputs)
+            t.cuda.set_device(self.device)
+            gathered_outputs = [None] * get_world_size()
+            all_gather_object(gathered_outputs, outputs)
+            gathered_outputs = list(itertools.chain.from_iterable(gathered_outputs))
+            self.validate_on_every_process(gathered_outputs)
         else:
-            self.validate_on_main_process(outputs)
+            self.validate_on_every_process(outputs)
 
-    def validate_on_main_process(self, outputs):
+    def validate_on_every_process(self, outputs):
         batch = collate_function_dict_to_batch_encoding([o["batch"] for o in outputs])
-        logits = t.cat([o["logits"] for o in outputs], dim=0)
+        list_of_logits = [
+            (int(idx), o["logits"]) for idx, o in zip(batch["idx"], outputs)
+        ]
+        # filter duplicates brought by resetting dataset
+        existed = {}
+        filtered = []
+        for ll in list_of_logits:
+            if ll[0] not in existed:
+                filtered.append(ll)
+                existed[ll[0]] = True
+        list_of_logits = filtered
+        list_of_logits.sort(key=lambda l: l[0])
+        logits = t.cat([ll[1] for ll in list_of_logits], dim=0)
         metrics = self.dataset.validate(batch, logits)
         for key, value in metrics.items():
-            self.log(key, value)
+            self.log(key, value, sync_dist=True)
 
     def test_step(self, batch: BatchEncoding, _batch_idx):
-        kb_embeds = self.kb_encoder.compute_sentence_embeds(
+        kb_embeds = self.kb_encoder[0].compute_sentence_embeds(
             sentence_tokens=batch["input_ids"].to(self.device),
             context_length=self.config.context_length,
             with_gradient_num=0,
@@ -185,17 +209,28 @@ class GLUETrainer(pl.LightningModule):
 
     def test_epoch_end(self, outputs):
         if self.is_distributed:
-            gathered_outputs = [None] * get_world_size() if get_rank() == 0 else None
-            gather_object(outputs, object_gather_list=gathered_outputs, dst=0)
-            if gathered_outputs is not None:
-                gathered_outputs = list(itertools.chain.from_iterable(gathered_outputs))
-                self.test_on_main_process(gathered_outputs)
+            t.cuda.set_device(self.device)
+            gathered_outputs = [None] * get_world_size()
+            all_gather_object(gathered_outputs, outputs)
+            gathered_outputs = list(itertools.chain.from_iterable(gathered_outputs))
+            self.test_on_main_process(gathered_outputs)
         else:
             self.test_on_main_process(outputs)
 
+    @rank_zero_only
     def test_on_main_process(self, outputs):
         batch = collate_function_dict_to_batch_encoding([o["batch"] for o in outputs])
-        list_of_logits = [(idx, o["logits"]) for idx, o in zip(batch["idx"], outputs)]
+        list_of_logits = [
+            (int(idx), o["logits"]) for idx, o in zip(batch["idx"], outputs)
+        ]
+        # filter duplicates brought by resetting dataset
+        existed = {}
+        filtered = []
+        for ll in list_of_logits:
+            if ll[0] not in existed:
+                filtered.append(ll)
+                existed[ll[0]] = True
+        list_of_logits = filtered
         list_of_logits.sort(key=lambda l: l[0])
         logits = t.cat([ll[1] for ll in list_of_logits], dim=0)
         assert logits.shape[0] == self.dataset.test_size, (

@@ -190,9 +190,10 @@ class ExtendVocabForSequenceClassification(ExtendVocab):
                 (before SoftMax).
         """
         # get token embeddings
-        # TODO: adpat this to other models
-        token_embeds = getattr(self.base, self.model_name).embeddings.word_embeddings(
-            token_ids
+        token_embeds = (
+            getattr(self.base, self.model_name)
+            .embeddings.word_embeddings(token_ids)
+            .detach()
         )
         if self.extend_mode == "ratio_mix":
             alpha = self.extend_config["alpha"]

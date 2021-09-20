@@ -4,14 +4,14 @@
             "accumulate_grad_batches": 1,
             "base_configs": {},
             "base_type": "bert-large-uncased",
-            "batch_size": 1,
-            "context_length": 200,
+            "batch_size": 32,
+            "context_length": 32,
             "epochs": 3,
             "extend_config": {
                 "alpha": 0.1
             },
             "extend_mode": "ratio_mix",
-            "kb_encoder_path": "/data/epoch=08-total_loss-total_loss=1.88.ckpt",
+            "kb_encoder_path": "/data/workspace/kb-ae-bert/train_entity_and_relation_64/0/checkpoint/epoch=01-total_loss-total_loss=1.70.ckpt",
             "kb_encoder_trainable": false,
             "kb_encoder_with_gradient_num": 1,
             "l2_regularization": 0,
@@ -28,14 +28,14 @@
             "accumulate_grad_batches": 1,
             "base_configs": {},
             "base_type": "bert-large-uncased",
-            "batch_size": 1,
-            "context_length": 200,
+            "batch_size": 32,
+            "context_length": 32,
             "epochs": 3,
             "extend_config": {
                 "alpha": 0.1
             },
             "extend_mode": "ratio_mix",
-            "kb_encoder_path": "/data/epoch=08-total_loss-total_loss=1.88.ckpt",
+            "kb_encoder_path": "/data/workspace/kb-ae-bert/train_entity_and_relation_64/0/checkpoint/epoch=01-total_loss-total_loss=1.70.ckpt",
             "kb_encoder_trainable": false,
             "kb_encoder_with_gradient_num": 1,
             "l2_regularization": 0,
@@ -52,14 +52,14 @@
             "accumulate_grad_batches": 1,
             "base_configs": {},
             "base_type": "bert-large-uncased",
-            "batch_size": 1,
-            "context_length": 200,
-            "epochs": 3,
+            "batch_size": 32,
+            "context_length": 32,
+            "epochs": 5,
             "extend_config": {
                 "alpha": 0.1
             },
             "extend_mode": "ratio_mix",
-            "kb_encoder_path": "/data/epoch=08-total_loss-total_loss=1.88.ckpt",
+            "kb_encoder_path": "/data/workspace/kb-ae-bert/train_entity_and_relation_64/0/checkpoint/epoch=01-total_loss-total_loss=1.70.ckpt",
             "kb_encoder_trainable": false,
             "kb_encoder_with_gradient_num": 1,
             "l2_regularization": 0,
@@ -76,14 +76,14 @@
             "accumulate_grad_batches": 1,
             "base_configs": {},
             "base_type": "bert-large-uncased",
-            "batch_size": 1,
-            "context_length": 200,
+            "batch_size": 32,
+            "context_length": 32,
             "epochs": 3,
             "extend_config": {
                 "alpha": 0.1
             },
             "extend_mode": "ratio_mix",
-            "kb_encoder_path": "/data/epoch=08-total_loss-total_loss=1.88.ckpt",
+            "kb_encoder_path": "/data/workspace/kb-ae-bert/train_entity_and_relation_64/0/checkpoint/epoch=01-total_loss-total_loss=1.70.ckpt",
             "kb_encoder_trainable": false,
             "kb_encoder_with_gradient_num": 1,
             "l2_regularization": 0,
@@ -100,14 +100,14 @@
             "accumulate_grad_batches": 1,
             "base_configs": {},
             "base_type": "bert-large-uncased",
-            "batch_size": 1,
-            "context_length": 200,
+            "batch_size": 32,
+            "context_length": 32,
             "epochs": 3,
             "extend_config": {
                 "alpha": 0.1
             },
             "extend_mode": "ratio_mix",
-            "kb_encoder_path": "/data/epoch=08-total_loss-total_loss=1.88.ckpt",
+            "kb_encoder_path": "/data/workspace/kb-ae-bert/train_entity_and_relation_64/0/checkpoint/epoch=01-total_loss-total_loss=1.70.ckpt",
             "kb_encoder_trainable": false,
             "kb_encoder_with_gradient_num": 1,
             "l2_regularization": 0,
@@ -124,14 +124,14 @@
             "accumulate_grad_batches": 1,
             "base_configs": {},
             "base_type": "bert-large-uncased",
-            "batch_size": 1,
-            "context_length": 200,
+            "batch_size": 32,
+            "context_length": 32,
             "epochs": 3,
             "extend_config": {
                 "alpha": 0.1
             },
             "extend_mode": "ratio_mix",
-            "kb_encoder_path": "/data/epoch=08-total_loss-total_loss=1.88.ckpt",
+            "kb_encoder_path": "/data/workspace/kb-ae-bert/train_entity_and_relation_64/0/checkpoint/epoch=01-total_loss-total_loss=1.70.ckpt",
             "kb_encoder_trainable": false,
             "kb_encoder_with_gradient_num": 1,
             "l2_regularization": 0,
@@ -148,14 +148,14 @@
             "accumulate_grad_batches": 1,
             "base_configs": {},
             "base_type": "bert-large-uncased",
-            "batch_size": 1,
-            "context_length": 200,
+            "batch_size": 32,
+            "context_length": 32,
             "epochs": 3,
             "extend_config": {
                 "alpha": 0.1
             },
             "extend_mode": "ratio_mix",
-            "kb_encoder_path": "/data/epoch=08-total_loss-total_loss=1.88.ckpt",
+            "kb_encoder_path": "/data/workspace/kb-ae-bert/train_entity_and_relation_64/0/checkpoint/epoch=01-total_loss-total_loss=1.70.ckpt",
             "kb_encoder_trainable": false,
             "kb_encoder_with_gradient_num": 1,
             "l2_regularization": 0,
@@ -172,14 +172,14 @@
             "accumulate_grad_batches": 1,
             "base_configs": {},
             "base_type": "bert-large-uncased",
-            "batch_size": 1,
-            "context_length": 200,
+            "batch_size": 32,
+            "context_length": 32,
             "epochs": 3,
             "extend_config": {
                 "alpha": 0.1
             },
             "extend_mode": "ratio_mix",
-            "kb_encoder_path": "/data/epoch=08-total_loss-total_loss=1.88.ckpt",
+            "kb_encoder_path": "/data/workspace/kb-ae-bert/train_entity_and_relation_64/0/checkpoint/epoch=01-total_loss-total_loss=1.70.ckpt",
             "kb_encoder_trainable": false,
             "kb_encoder_with_gradient_num": 1,
             "l2_regularization": 0,
@@ -190,15 +190,39 @@
             "max_test_samples": null,
             "optimizer_class": "Adam",
             "seed": 0,
-            "task": "mnli"
+            "task": "stsb"
+        },
+        {
+            "accumulate_grad_batches": 1,
+            "base_configs": {},
+            "base_type": "bert-large-uncased",
+            "batch_size": 32,
+            "context_length": 32,
+            "epochs": 5,
+            "extend_config": {
+                "alpha": 0.1
+            },
+            "extend_mode": "ratio_mix",
+            "kb_encoder_path": "/data/workspace/kb-ae-bert/train_entity_and_relation_64/0/checkpoint/epoch=01-total_loss-total_loss=1.70.ckpt",
+            "kb_encoder_trainable": false,
+            "kb_encoder_with_gradient_num": 1,
+            "l2_regularization": 0,
+            "learning_rate": 5e-05,
+            "load": false,
+            "max_train_samples": null,
+            "max_validate_samples": null,
+            "max_test_samples": null,
+            "optimizer_class": "Adam",
+            "seed": 0,
+            "task": "wnli"
         }
     ],
     "early_stopping_patience": 100,
     "gpus": [
-        0
+        0, 1, 2, 3
     ],
     "pipeline": [
         "glue", "glue", "glue", "glue", "glue", "glue", "glue", "glue", "glue"
     ],
-    "working_directory": "/data/workspace/kb-ae-bert/train-glue-full"
+    "working_directory": "/data/workspace/kb-ae-bert/train_glue_full_64"
 }

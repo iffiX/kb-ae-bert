@@ -89,7 +89,7 @@ def train(config: Config):
         trainer = pl.Trainer(
             gpus=config.gpus,
             accelerator="ddp" if len(config.gpus) > 1 else None,
-            plugins=[DDPPlugin(find_unused_parameters=False)],
+            plugins=[DDPPlugin(find_unused_parameters=True)],
             callbacks=[checkpoint_callback, early_stopping],
             logger=[t_logger],
             limit_train_batches=getattr(stage_config, "train_steps", None) or 1.0,
