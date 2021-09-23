@@ -1,11 +1,9 @@
-import os
 import itertools
 import warnings
-import numpy as np
 import torch as t
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader
-from torch.distributed import all_gather_object, get_rank, get_world_size
+from torch.distributed import all_gather_object, get_world_size, get_rank
 from transformers import AutoTokenizer, BatchEncoding
 from pytorch_lightning.utilities import rank_zero_only
 from .kb_trainer import KBEncoderTrainer
@@ -24,17 +22,9 @@ class GLUETrainer(pl.LightningModule):
         self.save_hyperparameters()
         warnings.filterwarnings("ignore")
 
-        np.random.seed(config.seed)
-        t.random.manual_seed(config.seed)
         self.config = config
         self.stage_result_path = stage_result_path
         self.is_distributed = is_distributed
-
-        self.kb_encoder = [
-            KBEncoderTrainer.load_from_checkpoint(
-                config.kb_encoder_path, only_init_model=True
-            ).kb_model
-        ]
 
         self.glue_tokenizer = AutoTokenizer.from_pretrained(
             config.base_type,
@@ -45,6 +35,13 @@ class GLUETrainer(pl.LightningModule):
         self.dataset = GLUEDataset(
             task=config.task,
             tokenizer=self.glue_tokenizer,
+            kb_model=KBEncoderTrainer.load_from_checkpoint(
+                config.kb_encoder_path, only_init_model=True
+            ).kb_model,
+            kb_context_length=config.kb_encoder_context_length,
+            kb_max_seq_length=config.kb_encoder_max_seq_length,
+            kb_process_gpus=config.kb_process_gpus,
+            kb_process_batch_size_per_gpu=config.kb_process_batch_size_per_gpu,
             max_seq_length=config.max_seq_length,
             max_train_samples=config.max_train_samples,
             max_validate_samples=config.max_validate_samples,
@@ -58,7 +55,6 @@ class GLUETrainer(pl.LightningModule):
             num_labels=self.dataset.num_labels,
             **config.base_configs,
         )
-        self.kb_moved = False
 
     @property
     def monitor(self):
@@ -74,6 +70,10 @@ class GLUETrainer(pl.LightningModule):
             "wnli": "accuracy",
         }
         return task_to_monitor[self.config.task]
+
+    @property
+    def monitor_mode(self):
+        return "max"
 
     def train_dataloader(self):
         return DataLoader(
@@ -98,47 +98,6 @@ class GLUETrainer(pl.LightningModule):
 
     # noinspection PyTypeChecker
     def training_step(self, batch: BatchEncoding, batch_idx):
-        if not self.kb_moved:
-            self.kb_encoder[0] = self.kb_encoder[0].to(self.device)
-            kb_moved = True
-        with_gradient_num = (
-            0
-            if not self.config.kb_encoder_trainable
-            else self.config.kb_encoder_with_gradient_num
-        )
-        with t.no_grad():
-            kb_embeds = self.kb_encoder[0].compute_sentence_embeds(
-                sentence_tokens=batch["input_ids"].to(self.device),
-                context_length=self.config.context_length,
-                with_gradient_num=with_gradient_num,
-            )
-            extend_tokens = t.where(
-                (batch["input_ids"] != self.glue_tokenizer.cls_token_id)
-                & (batch["input_ids"] != self.glue_tokenizer.sep_token_id)
-                & (batch["input_ids"] != self.glue_tokenizer.pad_token_id),
-                1,
-                0,
-            )
-        out = self.glue_model(
-            token_ids=batch["input_ids"].to(self.device),
-            extend_embeds=kb_embeds,
-            extend_tokens=extend_tokens,
-            attention_mask=batch["attention_mask"].to(self.device),
-            token_type_ids=batch["token_type_ids"].to(self.device),
-            labels=batch["label"].to(self.device),
-        )
-        return out[0]
-
-    # noinspection PyTypeChecker
-    def validation_step(self, batch: BatchEncoding, _batch_idx):
-        if not self.kb_moved:
-            self.kb_encoder[0] = self.kb_encoder[0].to(self.device)
-            kb_moved = True
-        kb_embeds = self.kb_encoder[0].compute_sentence_embeds(
-            sentence_tokens=batch["input_ids"].to(self.device),
-            context_length=self.config.context_length,
-            with_gradient_num=0,
-        )
         extend_tokens = t.where(
             (batch["input_ids"] != self.glue_tokenizer.cls_token_id)
             & (batch["input_ids"] != self.glue_tokenizer.sep_token_id)
@@ -148,8 +107,27 @@ class GLUETrainer(pl.LightningModule):
         )
         out = self.glue_model(
             token_ids=batch["input_ids"].to(self.device),
-            extend_embeds=kb_embeds,
-            extend_tokens=extend_tokens,
+            extend_embeds=batch["kb_embeds"].to(self.device),
+            extend_tokens=extend_tokens.to(self.device),
+            attention_mask=batch["attention_mask"].to(self.device),
+            token_type_ids=batch["token_type_ids"].to(self.device),
+            labels=batch["label"].to(self.device),
+        )
+        return out[0]
+
+    # noinspection PyTypeChecker
+    def validation_step(self, batch: BatchEncoding, _batch_idx):
+        extend_tokens = t.where(
+            (batch["input_ids"] != self.glue_tokenizer.cls_token_id)
+            & (batch["input_ids"] != self.glue_tokenizer.sep_token_id)
+            & (batch["input_ids"] != self.glue_tokenizer.pad_token_id),
+            1,
+            0,
+        )
+        out = self.glue_model(
+            token_ids=batch["input_ids"].to(self.device),
+            extend_embeds=batch["kb_embeds"].to(self.device),
+            extend_tokens=extend_tokens.to(self.device),
             attention_mask=batch["attention_mask"].to(self.device),
             token_type_ids=batch["token_type_ids"].to(self.device),
             labels=batch["label"].to(self.device),
@@ -167,30 +145,24 @@ class GLUETrainer(pl.LightningModule):
             self.validate_on_every_process(outputs)
 
     def validate_on_every_process(self, outputs):
-        batch = collate_function_dict_to_batch_encoding([o["batch"] for o in outputs])
-        list_of_logits = [
-            (int(idx), o["logits"]) for idx, o in zip(batch["idx"], outputs)
-        ]
-        # filter duplicates brought by resetting dataset
         existed = {}
         filtered = []
-        for ll in list_of_logits:
-            if ll[0] not in existed:
-                filtered.append(ll)
-                existed[ll[0]] = True
-        list_of_logits = filtered
-        list_of_logits.sort(key=lambda l: l[0])
-        logits = t.cat([ll[1] for ll in list_of_logits], dim=0)
+        for o in outputs:
+            idx = int(o["batch"]["idx"])
+            if idx not in existed:
+                filtered.append(o)
+                existed[idx] = o
+        batch = collate_function_dict_to_batch_encoding([f["batch"] for f in filtered])
+        logits = t.cat([f["logits"] for f in filtered], dim=0)
         metrics = self.dataset.validate(batch, logits)
         for key, value in metrics.items():
-            self.log(key, value, sync_dist=True)
+            self.log(key, value, prog_bar=True, sync_dist=True)
+        if get_rank() == 0:
+            print("Validation result:")
+            for key, value in metrics.items():
+                print(f"{key}: {value}")
 
     def test_step(self, batch: BatchEncoding, _batch_idx):
-        kb_embeds = self.kb_encoder[0].compute_sentence_embeds(
-            sentence_tokens=batch["input_ids"].to(self.device),
-            context_length=self.config.context_length,
-            with_gradient_num=0,
-        )
         extend_tokens = t.where(
             (batch["input_ids"] != self.glue_tokenizer.cls_token_id)
             & (batch["input_ids"] != self.glue_tokenizer.sep_token_id)
@@ -200,8 +172,8 @@ class GLUETrainer(pl.LightningModule):
         )
         out = self.glue_model(
             token_ids=batch["input_ids"].to(self.device),
-            extend_embeds=kb_embeds,
-            extend_tokens=extend_tokens,
+            extend_embeds=batch["kb_embeds"].to(self.device),
+            extend_tokens=extend_tokens.to(self.device),
             attention_mask=batch["attention_mask"].to(self.device),
             token_type_ids=batch["token_type_ids"].to(self.device),
         )

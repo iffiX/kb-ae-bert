@@ -89,7 +89,6 @@ class GLUETrainConfig(BaseModel):
     optimizer_class: str = "Adam"
     learning_rate: float = 2e-5
     l2_regularization: float = 0
-    context_length: int = 200
 
     base_type: str = "bert-base-uncased"
     max_seq_length: int = 128
@@ -98,8 +97,10 @@ class GLUETrainConfig(BaseModel):
     base_configs: Dict[str, Any] = {}
 
     kb_encoder_path: str = ""
-    kb_encoder_trainable: bool = False
-    kb_encoder_with_gradient_num: int = 1
+    kb_encoder_context_length: int = 32
+    kb_encoder_max_seq_length: int = 64
+    kb_process_gpus: List[int] = [0]
+    kb_process_batch_size_per_gpu: int = 32
 
 
 class Config(BaseModel):

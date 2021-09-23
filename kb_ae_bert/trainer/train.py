@@ -1,10 +1,12 @@
 import os
+import sys
 import logging
 import pytorch_lightning as pl
 from ..utils.config import *
 from .kb_trainer import KBEncoderTrainer
 from .qa_trainer import QATrainer
 from .glue_trainer import GLUETrainer
+from pytorch_lightning import seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.plugins import DDPPlugin
@@ -68,15 +70,15 @@ def train(config: Config):
             + "-{"
             + stage_trainer.monitor
             + ":.2f}",
-            save_top_k=2,
-            save_last=True,
+            save_top_k=1,
+            save_last=False,
             monitor=stage_trainer.monitor,
-            mode="min",
+            mode=stage_trainer.monitor_mode,
             verbose=True,
         )
         early_stopping = EarlyStopping(
             monitor=stage_trainer.monitor,
-            mode="min",
+            mode=stage_trainer.monitor_mode,
             patience=config.early_stopping_patience,
             verbose=True,
         )
@@ -86,6 +88,7 @@ def train(config: Config):
         if stage_config.load:
             checkpoint, _version = find_checkpoint(config, stage_index)
 
+        seed_everything(stage_config.seed, workers=True)
         trainer = pl.Trainer(
             gpus=config.gpus,
             accelerator="ddp" if len(config.gpus) > 1 else None,
@@ -100,6 +103,10 @@ def train(config: Config):
             # val_check_interval=stage_config.train_steps,
             accumulate_grad_batches=stage_config.accumulate_grad_batches,
             resume_from_checkpoint=checkpoint,
+            deterministic=True,
         )
+
         trainer.fit(stage_trainer)
-        trainer.test(stage_trainer, verbose=True)
+        trainer.test(stage_trainer, verbose=True, ckpt_path="best")
+        if trainer.global_rank != 0:
+            sys.exit(0)

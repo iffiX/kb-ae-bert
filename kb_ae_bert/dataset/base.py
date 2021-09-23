@@ -1,4 +1,5 @@
 import torch as t
+import time
 from typing import Callable, Dict, List, Union, Any
 from torch.utils.data import Dataset, IterableDataset
 from transformers import BatchEncoding
@@ -7,7 +8,7 @@ import traceback
 
 
 class StaticMapDataset(Dataset):
-    def __init__(self, encodings: BatchEncoding):
+    def __init__(self, encodings: Union[Dict, BatchEncoding]):
         self.encodings = encodings
 
     def __getitem__(self, idx: int):
@@ -16,7 +17,7 @@ class StaticMapDataset(Dataset):
         }
 
     def __len__(self):
-        return len(self.encodings.input_ids)
+        return len(self.encodings["input_ids"])
 
 
 class StaticIterableDataset(Dataset):
@@ -93,13 +94,9 @@ def collate_function_dict_to_batch_encoding(
                 result[k] = t.tensor(data_list, dtype=t.int64)
             elif isinstance(data_list[0], float):
                 result[k] = t.tensor(data_list, dtype=t.float32)
-            elif isinstance(data_list[0], list):
-                if isinstance(data_list[0][0], int):
-                    result[k] = t.tensor(data_list, dtype=t.int64)
-                elif isinstance(data_list[0][0], float):
-                    result[k] = t.tensor(data_list, dtype=t.float32)
-                else:
-                    result[k] = data_list
             else:
-                result[k] = data_list
+                try:
+                    result[k] = t.tensor(data_list)
+                except:
+                    result[k] = data_list
     return BatchEncoding(data=result)

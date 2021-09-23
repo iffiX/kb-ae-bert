@@ -5,7 +5,6 @@ from transformers import (
 )
 from ..utils.settings import model_cache_dir, proxies
 from ..utils.token import get_context_of_masked
-import random
 import torch as t
 import torch.nn as nn
 import numpy as np
@@ -50,9 +49,6 @@ class KBMaskedLMEncoder(nn.Module):
         self._mask_id = tokenizer.mask_token_id
         self._cls_id = tokenizer.cls_token_id
         self._sep_id = tokenizer.sep_token_id
-        self._input_sequence_length = (
-            tokenizer.max_model_input_sizes.get(base_type, None) or 512
-        )
 
         # relation head on [cls]
         mlp = []
@@ -116,7 +112,11 @@ class KBMaskedLMEncoder(nn.Module):
             return sim
 
     def compute_sentence_embeds(
-        self, sentence_tokens, context_length: int, with_gradient_num: int = 1
+        self,
+        sentences_tokens,
+        context_length: int,
+        sequence_length: int,
+        process_batch_size: int,
     ):
         """
         Compute the embedding for words in a batch of sentences. The embedding is
@@ -145,67 +145,69 @@ class KBMaskedLMEncoder(nn.Module):
         we wish to predict them.
 
         Args:
-            sentence_tokens: Token ids, LongTensor of shape
+            sentences_tokens: Token ids, LongTensor of shape
                 (batch_size, sequence_length).
             context_length: Length of the context provided to this model.
-            with_gradient_num: Since it is not possible to perform backward operation
-                on all input words (batch_size = sequence_length, exceeds memory),
-                select this number of token inputs per sample in batch to perform
-                forward with gradient. The total with gradient token number is equal to
-                batch_size * with_gradient_num
+            sequence_length: Length of the sequence provided to this model.
+            process_batch_size: Batch size for processing meaningful tokens from
+                all sentences.
 
         Returns:
             cls embedding: Float tensor of shape
                 (batch_size, sequence_length, hidden_size).
         """
-        batch_size = sentence_tokens.shape[0]
-        sequence_length = sentence_tokens.shape[1]
-        device = sentence_tokens.device
+        device = sentences_tokens.device
 
         # generate masked context
-        result = []
-        for sentence in sentence_tokens:
-            # find first sep
-            end = sentence.cpu().tolist().index(self._sep_id)
-            length = end - 1
-            mask_position = t.arange(length, dtype=t.long, device=device)
+        kb_input = []
+        mask_positions = [[], []]
+        embeddings = []
+        helper_tokens = {self._pad_id, self._mask_id, self._cls_id, self._sep_id}
+        for idx, sentence in enumerate(sentences_tokens):
+            mask_position = []
+            for i in range(len(sentence)):
+                if int(sentence[i]) not in helper_tokens:
+                    mask_position.append(i)
+                else:
+                    # clear out mask, cls and sep
+                    sentence[i] = self._pad_id
+
+            mask_length = len(mask_position)
             _, masked_context = get_context_of_masked(
-                sentence_tokens=sentence[1:end].unsqueeze(0).repeat(length, 1),
-                mask_position=mask_position,
+                sentence_tokens=sentence.unsqueeze(0).repeat(mask_length, 1),
+                mask_position=t.tensor(mask_position, dtype=t.long, device=device),
                 context_length=context_length,
                 mask_id=self._mask_id,
                 pad_id=self._pad_id,
             )
 
             # generate input
-            cls_ = t.full([length, 1], self._cls_id, dtype=t.long, device=device,)
-            sep = t.full([length, 1], self._sep_id, dtype=t.long, device=device,)
-            mask_pad = t.full(
-                [length, self._input_sequence_length - 3 - context_length,],
-                self._sep_id,
+            cls = t.full([mask_length, 1], self._cls_id, dtype=t.long, device=device,)
+            sep = t.full([mask_length, 1], self._sep_id, dtype=t.long, device=device,)
+            # The relation region is filled with [MASK]
+            relation = t.full(
+                [mask_length, sequence_length - 3 - context_length],
+                self._mask_id,
                 dtype=t.long,
                 device=device,
             )
-            input_tokens = t.cat((cls_, masked_context, sep, mask_pad, sep), dim=1)
-            with_gradient_indexes = random.sample(
-                range(input_tokens.shape[0]), with_gradient_num * batch_size
-            )
-            embedding_list = []
-            for i in range(input_tokens.shape[0]):
-                if i in with_gradient_indexes:
-                    embedding = self.__call__(input_tokens[i].unsqueeze(0))[0]
-                else:
-                    with t.no_grad():
-                        embedding = self.__call__(input_tokens[i].unsqueeze(0))[0]
-                embedding_list.append(embedding)
-            pad = t.zeros_like(embedding_list[0])
-            embedding_list = (
-                [pad]
-                + embedding_list
-                + [pad] * (sequence_length - len(embedding_list) - 1)
-            )
-            result.append(t.cat(embedding_list, dim=0).view(1, sequence_length, -1))
-        return t.cat(result, dim=0).view(batch_size, sequence_length, -1)
+            # appended tensor is of shape [mask_length, sequence_length]
+            kb_input.append(t.cat((cls, masked_context, sep, relation, sep), dim=1))
+            mask_positions[0] += [idx] * len(mask_position)
+            mask_positions[1] += mask_position
+
+        kb_input = t.cat(kb_input, dim=0)
+        for inp in t.split(kb_input, process_batch_size, dim=0):
+            embeddings.append(self.__call__(inp)[0])
+        embeddings = t.cat(embeddings, dim=0)
+
+        result = t.zeros(
+            [sentences_tokens.shape[0], sentences_tokens.shape[1], embeddings.shape[1]],
+            dtype=embeddings.dtype,
+            device=device,
+        )
+        result[mask_positions[0], mask_positions[1]] = embeddings
+        return result
 
     def forward(self, tokens, attention_mask=None, token_type_ids=None, labels=None):
         """

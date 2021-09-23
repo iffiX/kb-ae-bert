@@ -1,4 +1,3 @@
-import numpy as np
 import torch as t
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader
@@ -18,8 +17,6 @@ class QATrainer(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters()
 
-        np.random.seed(config.seed)
-        t.random.manual_seed(config.seed)
         self.config = config
         self.stage_result_path = stage_result_path
         self.is_distributed = is_distributed

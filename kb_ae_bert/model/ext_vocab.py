@@ -4,6 +4,7 @@ from transformers import (
     AutoModelForSequenceClassification,
 )
 from ..utils.settings import model_cache_dir, proxies
+import numpy as np
 import torch as t
 import torch.nn as nn
 
@@ -37,16 +38,41 @@ class ExtendVocab(nn.Module):
             return_dict=True,
             **base_configs,
         )
-        if extend_mode == "ratio_mix_learnable":
-            self.mix_weight = nn.Parameter(t.rand(self.base.config.hidden_size))
-        elif extend_mode in ("ratio_mix", "replace"):
-            pass
-        else:
-            raise ValueError(f"Unknown extend_mode {extend_mode}")
         self.base_type = base_type
         self.model_name = base_type.split("-")[0].lower()
         self.extend_mode = extend_mode
         self.extend_config = extend_config or {}
+
+        if extend_mode == "ratio_mix_learnable":
+            self.mix_weight = nn.Parameter(t.rand(self.base.config.hidden_size))
+        elif extend_mode in ("ratio_mix", "replace", "replace_partial"):
+            pass
+        elif extend_mode == "mlp":
+            # self.mlp = nn.Linear(
+            #     self.base.config.hidden_size * 2, self.base.config.hidden_size
+            # )
+            self.mlp = nn.Linear(
+                self.base.config.hidden_size, self.base.config.hidden_size
+            )
+        else:
+            raise ValueError(f"Unknown extend_mode {extend_mode}")
+
+    def parameters(self, recurse: bool = True):
+        if self.extend_config.get("freeze_base", False):
+            parameters = [
+                param
+                for name, param in self.base.named_parameters()
+                if self.model_name not in name
+            ]
+        else:
+            parameters = list(self.base.parameters(recurse=recurse))
+
+        if self.extend_mode == "ratio_mix_learnable":
+            return parameters + [self.mix_weight]
+        elif self.extend_mode == "mlp":
+            return parameters + list(self.mlp.parameters())
+        else:
+            return parameters
 
 
 class ExtendVocabForQA(ExtendVocab):
@@ -123,6 +149,14 @@ class ExtendVocabForQA(ExtendVocab):
         elif self.extend_mode == "replace":
             token_embeds = t.where(
                 extend_tokens.unsqueeze(-1) == 1, extend_embeds, token_embeds
+            )
+        elif self.extend_mode == "replace_partial":
+            new_embeds = extend_embeds.clone()
+            new_embeds[:, :, : self.extend_config["replace_dims"]] = token_embeds[
+                :, :, : self.extend_config["replace_dims"]
+            ]
+            token_embeds = t.where(
+                extend_tokens.unsqueeze(-1) == 1, new_embeds, token_embeds
             )
         out = self.base(
             inputs_embeds=token_embeds,
@@ -211,6 +245,47 @@ class ExtendVocabForSequenceClassification(ExtendVocab):
             token_embeds = t.where(
                 extend_tokens.unsqueeze(-1) == 1, extend_embeds, token_embeds
             )
+        elif self.extend_mode == "replace_partial":
+            new_embeds = extend_embeds.clone()
+            new_embeds[:, :, : self.extend_config["replace_dims"]] = token_embeds[
+                :, :, : self.extend_config["replace_dims"]
+            ]
+            token_embeds = t.where(
+                extend_tokens.unsqueeze(-1) == 1, new_embeds, token_embeds
+            )
+        elif self.extend_mode == "mlp":
+            # both works
+            # new_embeds = self.mlp(t.cat((token_embeds, extend_embeds), dim=2))
+            new_embeds = self.mlp(extend_embeds)
+
+            l2_normalizer = t.sqrt(t.sum(new_embeds ** 2) / t.sum(token_embeds ** 2))
+
+            # global word embedding norm will not work
+            # l2_normalizer = t.sqrt(
+            #     t.mean(t.sum(new_embeds ** 2, dim=2))
+            #     / t.mean(
+            #         t.sum(
+            #             getattr(
+            #                 self.base, self.model_name
+            #             ).embeddings.word_embeddings.weight.detach()
+            #             ** 2,
+            #             dim=1,
+            #         )
+            #     )
+            # )
+
+            # detached version will also not work because it is not passing back
+            # the norm gradient info
+            l2_normalizer = t.sqrt(
+                t.sum(new_embeds ** 2) / t.sum(token_embeds ** 2)
+            ).detach()
+
+            # residual connection is necessary
+            new_embeds = new_embeds / l2_normalizer + token_embeds
+            token_embeds = t.where(
+                extend_tokens.unsqueeze(-1) == 1, new_embeds, token_embeds
+            )
+
         out = self.base(
             inputs_embeds=token_embeds,
             attention_mask=attention_mask,
