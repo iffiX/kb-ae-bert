@@ -3,6 +3,7 @@ import warnings
 import torch as t
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from torch.distributed import all_gather_object, get_world_size, get_rank
 from transformers import AutoTokenizer, BatchEncoding
 from pytorch_lightning.utilities import rank_zero_only

@@ -121,7 +121,7 @@ class Config(BaseModel):
     configs: List[Union[QATrainConfig, KBEncoderTrainConfig, GLUETrainConfig]] = []
 
 
-def load_config(path: str):
+def load_config(path: str) -> Config:
     with open(path, "r") as f:
         config_dict = json.load(f)
         config = Config(

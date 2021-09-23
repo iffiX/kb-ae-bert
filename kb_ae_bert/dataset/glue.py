@@ -394,6 +394,7 @@ class GLUEDataset:
                 group = file.create_group(dataset_name)
                 for sub_dataset_name in dataset:
                     logging.info(f"Processing {sub_dataset_name}")
+
                     limit_num = None
                     if "train" in sub_dataset_name:
                         limit_num = self.max_train_samples
@@ -404,7 +405,8 @@ class GLUEDataset:
                     if limit_num is not None:
                         if limit_num <= 0:
                             raise ValueError(
-                                f"Select number must be greater than 0, but got {limit_num}"
+                                f"Select number must be greater than 0, "
+                                f"but got {limit_num}"
                             )
                         limit_num = min(len(dataset[sub_dataset_name]), limit_num)
                     else:
@@ -468,6 +470,7 @@ class GLUEDataset:
                                 truncation=True,
                                 return_tensors="np",
                             )
+
                             with t.no_grad():
                                 kb_embeds = (
                                     kb_model(
@@ -512,10 +515,9 @@ class GLUEDataset:
                                     dataset_id_dataset[i : i + processed_num] = self.AX
                             else:
                                 dataset_id_dataset[i : i + processed_num] = -1
-
                             progress_bar.update(processed_num)
 
     def open_file(self):
         data_path = os.path.join(preprocess_cache_dir, "glue_data", f"{self.task}.hdf5")
         os.makedirs(os.path.dirname(data_path), exist_ok=True)
-        self.file = h5py.File(data_path, "r", rdcc_nbytes=1024 ** 3)
+        self.file = h5py.File(data_path, "r", rdcc_nbytes=4 * 1024 ** 3)

@@ -5,11 +5,9 @@
             "base_configs": {},
             "base_type": "bert-large-uncased",
             "batch_size": 8,
-            "epochs": 15,
-            "extend_config": {
-                "alpha": 0.1
-            },
-            "extend_mode": "ratio_mix",
+            "epochs": 10,
+            "extend_config": {},
+            "extend_mode": "mlp",
             "kb_encoder_path": "/data/workspace/kb-ae-bert/train_entity_and_relation_64/0/checkpoint/epoch=01-total_loss-total_loss=1.70.ckpt",
             "kb_encoder_context_length": 32,
             "kb_encoder_max_seq_length": 64,
@@ -31,10 +29,8 @@
             "base_type": "bert-large-uncased",
             "batch_size": 8,
             "epochs": 15,
-            "extend_config": {
-                "alpha": 0.1
-            },
-            "extend_mode": "ratio_mix",
+            "extend_config": {},
+            "extend_mode": "mlp",
             "kb_encoder_path": "/data/workspace/kb-ae-bert/train_entity_and_relation_64/0/checkpoint/epoch=01-total_loss-total_loss=1.70.ckpt",
             "kb_encoder_context_length": 32,
             "kb_encoder_max_seq_length": 64,
@@ -56,10 +52,8 @@
             "base_type": "bert-large-uncased",
             "batch_size": 8,
             "epochs": 5,
-            "extend_config": {
-                "alpha": 0.1
-            },
-            "extend_mode": "ratio_mix",
+            "extend_config": {},
+            "extend_mode": "mlp",
             "kb_encoder_path": "/data/workspace/kb-ae-bert/train_entity_and_relation_64/0/checkpoint/epoch=01-total_loss-total_loss=1.70.ckpt",
             "kb_encoder_context_length": 32,
             "kb_encoder_max_seq_length": 64,
@@ -81,10 +75,8 @@
             "base_type": "bert-large-uncased",
             "batch_size": 8,
             "epochs": 5,
-            "extend_config": {
-                "alpha": 0.1
-            },
-            "extend_mode": "ratio_mix",
+            "extend_config": {},
+            "extend_mode": "mlp",
             "kb_encoder_path": "/data/workspace/kb-ae-bert/train_entity_and_relation_64/0/checkpoint/epoch=01-total_loss-total_loss=1.70.ckpt",
             "kb_encoder_context_length": 32,
             "kb_encoder_max_seq_length": 64,
@@ -106,10 +98,8 @@
             "base_type": "bert-large-uncased",
             "batch_size": 8,
             "epochs": 15,
-            "extend_config": {
-                "alpha": 0.1
-            },
-            "extend_mode": "ratio_mix",
+            "extend_config": {},
+            "extend_mode": "mlp",
             "kb_encoder_path": "/data/workspace/kb-ae-bert/train_entity_and_relation_64/0/checkpoint/epoch=01-total_loss-total_loss=1.70.ckpt",
             "kb_encoder_context_length": 32,
             "kb_encoder_max_seq_length": 64,
@@ -131,10 +121,8 @@
             "base_type": "bert-large-uncased",
             "batch_size": 8,
             "epochs": 5,
-            "extend_config": {
-                "alpha": 0.1
-            },
-            "extend_mode": "ratio_mix",
+            "extend_config": {},
+            "extend_mode": "mlp",
             "kb_encoder_path": "/data/workspace/kb-ae-bert/train_entity_and_relation_64/0/checkpoint/epoch=01-total_loss-total_loss=1.70.ckpt",
             "kb_encoder_context_length": 32,
             "kb_encoder_max_seq_length": 64,
@@ -156,10 +144,8 @@
             "base_type": "bert-large-uncased",
             "batch_size": 8,
             "epochs": 5,
-            "extend_config": {
-                "alpha": 0.1
-            },
-            "extend_mode": "ratio_mix",
+            "extend_config": {},
+            "extend_mode": "mlp",
             "kb_encoder_path": "/data/workspace/kb-ae-bert/train_entity_and_relation_64/0/checkpoint/epoch=01-total_loss-total_loss=1.70.ckpt",
             "kb_encoder_context_length": 32,
             "kb_encoder_max_seq_length": 64,
@@ -181,10 +167,8 @@
             "base_type": "bert-large-uncased",
             "batch_size": 8,
             "epochs": 3,
-            "extend_config": {
-                "alpha": 0.1
-            },
-            "extend_mode": "ratio_mix",
+            "extend_config": {},
+            "extend_mode": "mlp",
             "kb_encoder_path": "/data/workspace/kb-ae-bert/train_entity_and_relation_64/0/checkpoint/epoch=01-total_loss-total_loss=1.70.ckpt",
             "kb_encoder_context_length": 32,
             "kb_encoder_max_seq_length": 64,
@@ -206,10 +190,8 @@
             "base_type": "bert-large-uncased",
             "batch_size": 8,
             "epochs": 3,
-            "extend_config": {
-                "alpha": 0.1
-            },
-            "extend_mode": "ratio_mix",
+            "extend_config": {},
+            "extend_mode": "mlp",
             "kb_encoder_path": "/data/workspace/kb-ae-bert/train_entity_and_relation_64/0/checkpoint/epoch=01-total_loss-total_loss=1.70.ckpt",
             "kb_encoder_context_length": 32,
             "kb_encoder_max_seq_length": 64,
