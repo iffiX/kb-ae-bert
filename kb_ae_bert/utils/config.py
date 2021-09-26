@@ -18,6 +18,7 @@ class KDWDConfig(BaseModel):
 class KBEncoderTrainConfig(BaseModel):
     load: bool = False
     seed: int = 0
+    save: bool = True
     epochs: int = 100
     train_steps: Optional[int] = None
     validate_steps: Optional[int] = None
@@ -51,6 +52,7 @@ class KBEncoderTrainConfig(BaseModel):
 class QATrainConfig(BaseModel):
     load: bool = False
     seed: int = 0
+    save: bool = True
     epochs: int = 100
     train_steps: Optional[int] = None
     validate_steps: Optional[int] = None
@@ -79,6 +81,7 @@ class GLUETrainConfig(BaseModel):
     task: str = "cola"
     load: bool = False
     seed: int = 0
+    save: bool = True
     epochs: int = 3
     batch_size: int = 2
     accumulate_grad_batches: int = 32
@@ -89,6 +92,9 @@ class GLUETrainConfig(BaseModel):
     optimizer_class: str = "Adam"
     learning_rate: float = 2e-5
     l2_regularization: float = 0
+
+    load_worker_num: Optional[int] = 0
+    load_prefetch_per_worker: Optional[int] = 2
 
     base_type: str = "bert-base-uncased"
     max_seq_length: int = 128

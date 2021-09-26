@@ -3,7 +3,6 @@ import warnings
 import torch as t
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
 from torch.distributed import all_gather_object, get_world_size, get_rank
 from transformers import AutoTokenizer, BatchEncoding
 from pytorch_lightning.utilities import rank_zero_only
@@ -79,6 +78,8 @@ class GLUETrainer(pl.LightningModule):
     def train_dataloader(self):
         return DataLoader(
             dataset=self.dataset.train_dataset,
+            num_workers=self.config.load_worker_num,
+            prefetch_factor=self.config.load_prefetch_per_worker,
             batch_size=self.config.batch_size,
             collate_fn=collate_function_dict_to_batch_encoding,
         )
@@ -133,7 +134,17 @@ class GLUETrainer(pl.LightningModule):
             token_type_ids=batch["token_type_ids"].to(self.device),
             labels=batch["label"].to(self.device),
         )
-        return {"batch": batch.to("cpu"), "logits": out[1].cpu()}
+        batch = batch.to("cpu")
+        return {
+            "batch": BatchEncoding(
+                {
+                    "idx": batch["idx"],
+                    "label": batch["label"],
+                    "dataset_id": batch["dataset_id"],
+                }
+            ),
+            "logits": out[1].cpu(),
+        }
 
     def validation_epoch_end(self, outputs):
         if self.is_distributed:
@@ -178,7 +189,17 @@ class GLUETrainer(pl.LightningModule):
             attention_mask=batch["attention_mask"].to(self.device),
             token_type_ids=batch["token_type_ids"].to(self.device),
         )
-        return {"batch": batch.to("cpu"), "logits": out[1].cpu()}
+        batch = batch.to("cpu")
+        return {
+            "batch": BatchEncoding(
+                {
+                    "idx": batch["idx"],
+                    "label": batch["label"],
+                    "dataset_id": batch["dataset_id"],
+                }
+            ),
+            "logits": out[1].cpu(),
+        }
 
     def test_epoch_end(self, outputs):
         if self.is_distributed:

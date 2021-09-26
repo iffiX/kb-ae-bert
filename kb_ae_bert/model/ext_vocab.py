@@ -4,9 +4,35 @@ from transformers import (
     AutoModelForSequenceClassification,
 )
 from ..utils.settings import model_cache_dir, proxies
-import numpy as np
+import logging
 import torch as t
 import torch.nn as nn
+
+
+class SharedVariable:
+    def __init__(self):
+        self.val = None
+
+    def set(self, val):
+        self.val = val
+
+    def get(self):
+        return self.val
+
+
+class HiddenPlugin(nn.Module):
+    def __init__(self, encoder_layer, hidden_size, mlp_input: SharedVariable):
+        super(HiddenPlugin, self).__init__()
+        self.encoder_layer = encoder_layer
+        self.mlp = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.mlp_input = mlp_input
+
+    def forward(self, hidden_states, *args, **kwargs):
+        mix = self.mlp(self.mlp_input.get())
+        assert list(hidden_states.shape) == list(mix.shape)
+        l2_normalizer = t.sqrt(t.sum(mix ** 2) / t.sum(hidden_states ** 2)).detach()
+        new_hidden_states = mix / l2_normalizer + hidden_states
+        return self.encoder_layer(new_hidden_states, *args, **kwargs)
 
 
 class ExtendVocab(nn.Module):
@@ -45,34 +71,59 @@ class ExtendVocab(nn.Module):
 
         if extend_mode == "ratio_mix_learnable":
             self.mix_weight = nn.Parameter(t.rand(self.base.config.hidden_size))
-        elif extend_mode in ("ratio_mix", "replace", "replace_partial"):
+        elif extend_mode in ("ratio_mix", "replace", "replace_partial", "none"):
             pass
         elif extend_mode == "mlp":
             # self.mlp = nn.Linear(
             #     self.base.config.hidden_size * 2, self.base.config.hidden_size
             # )
+            # better if no bias
             self.mlp = nn.Linear(
-                self.base.config.hidden_size, self.base.config.hidden_size
+                self.base.config.hidden_size, self.base.config.hidden_size, bias=False
+            )
+        elif extend_mode == "mlp_internal":
+            self.mlp_input = SharedVariable()
+            internal_layer_indexes = list(
+                range(len(getattr(self.base, self.model_name).encoder.layer))
+            )
+            modified_internal_layers = [
+                internal_layer_indexes[m]
+                for m in extend_config["modified_internal_layers"]
+            ]
+            new_encoder_layer = nn.ModuleList(
+                [
+                    HiddenPlugin(layer, self.base.config.hidden_size, self.mlp_input)
+                    if idx in modified_internal_layers
+                    else layer
+                    for idx, layer in enumerate(
+                        getattr(self.base, self.model_name).encoder.layer
+                    )
+                ]
+            )
+            getattr(self.base, self.model_name).encoder.layer = new_encoder_layer
+            logging.info(
+                f"Modified internal layers: {modified_internal_layers}, "
+                f"from layers: {internal_layer_indexes}"
             )
         else:
             raise ValueError(f"Unknown extend_mode {extend_mode}")
 
-    def parameters(self, recurse: bool = True):
-        if self.extend_config.get("freeze_base", False):
-            parameters = [
-                param
-                for name, param in self.base.named_parameters()
-                if self.model_name not in name
-            ]
-        else:
-            parameters = list(self.base.parameters(recurse=recurse))
-
-        if self.extend_mode == "ratio_mix_learnable":
-            return parameters + [self.mix_weight]
-        elif self.extend_mode == "mlp":
-            return parameters + list(self.mlp.parameters())
-        else:
-            return parameters
+    # def parameters(self, recurse: bool = True):
+    #     if self.extend_config.get("freeze_base", False):
+    #         parameters = [
+    #             param
+    #             for name, param in self.base.named_parameters()
+    #             if self.model_name not in name
+    #         ]
+    #     else:
+    #         parameters = list(self.base.parameters(recurse=recurse))
+    #
+    #     if self.extend_mode == "ratio_mix_learnable":
+    #         return parameters + [self.mix_weight]
+    #     elif self.extend_mode == "mlp":
+    #         return parameters + list(self.mlp.parameters())
+    #     else:
+    #         return parameters
 
 
 class ExtendVocabForQA(ExtendVocab):
@@ -158,6 +209,21 @@ class ExtendVocabForQA(ExtendVocab):
             token_embeds = t.where(
                 extend_tokens.unsqueeze(-1) == 1, new_embeds, token_embeds
             )
+        elif self.extend_mode == "mlp":
+            # both works
+            # new_embeds = self.mlp(t.cat((token_embeds, extend_embeds), dim=2))
+            new_embeds = self.mlp(extend_embeds)
+
+            l2_normalizer = t.sqrt(t.sum(new_embeds ** 2) / t.sum(token_embeds ** 2))
+            new_embeds = new_embeds / l2_normalizer + token_embeds
+            token_embeds = t.where(
+                extend_tokens.unsqueeze(-1) == 1, new_embeds, token_embeds
+            )
+        elif self.extend_mode == "mlp_internal":
+            self.mlp_input.set(extend_embeds)
+        elif self.extend_mode == "none":
+            pass
+
         out = self.base(
             inputs_embeds=token_embeds,
             attention_mask=attention_mask,
@@ -254,11 +320,14 @@ class ExtendVocabForSequenceClassification(ExtendVocab):
                 extend_tokens.unsqueeze(-1) == 1, new_embeds, token_embeds
             )
         elif self.extend_mode == "mlp":
-            # both works
+            # not working
+
             # new_embeds = self.mlp(t.cat((token_embeds, extend_embeds), dim=2))
             new_embeds = self.mlp(extend_embeds)
-
-            l2_normalizer = t.sqrt(t.sum(new_embeds ** 2) / t.sum(token_embeds ** 2))
+            assert list(new_embeds.shape) == list(token_embeds.shape)
+            l2_normalizer = t.sqrt(
+                t.sum(new_embeds ** 2) / t.sum(token_embeds ** 2)
+            ).detach()
 
             # global word embedding norm will not work
             # l2_normalizer = t.sqrt(
@@ -274,24 +343,30 @@ class ExtendVocabForSequenceClassification(ExtendVocab):
             #     )
             # )
 
-            # detached version will also not work because it is not passing back
-            # the norm gradient info
-            l2_normalizer = t.sqrt(
-                t.sum(new_embeds ** 2) / t.sum(token_embeds ** 2)
-            ).detach()
-
             # residual connection is necessary
             new_embeds = new_embeds / l2_normalizer + token_embeds
             token_embeds = t.where(
                 extend_tokens.unsqueeze(-1) == 1, new_embeds, token_embeds
             )
+        elif self.extend_mode == "mlp_internal":
+            self.mlp_input.set(extend_embeds)
+        elif self.extend_mode == "none":
+            pass
 
-        out = self.base(
-            inputs_embeds=token_embeds,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-            labels=labels,
-        )
+        if self.extend_mode != "mlp_internal":
+            out = self.base(
+                inputs_embeds=token_embeds,
+                attention_mask=attention_mask,
+                token_type_ids=token_type_ids,
+                labels=labels,
+            )
+        else:
+            out = self.base(
+                input_ids=token_ids,
+                attention_mask=attention_mask,
+                token_type_ids=token_type_ids,
+                labels=labels,
+            )
         return (
             None if labels is None else out.loss,
             out.logits,

@@ -32,6 +32,7 @@ def train(config: Config, stage_index: int):
     is_distributed = len(config.gpus) > 1
     stage = config.pipeline[stage_index]
     stage_config = config.configs[stage_index]
+    # seed_everything(stage_config.seed, workers=True)
 
     checkpoint_path = os.path.join(
         config.working_directory, str(stage_index), "checkpoint"
@@ -62,7 +63,7 @@ def train(config: Config, stage_index: int):
     # create directories, or reuse
     os.makedirs(checkpoint_path, exist_ok=True)
     os.makedirs(log_path, exist_ok=True)
-
+    save_config(config, os.path.join(config.working_directory, "config.json"))
     checkpoint_callback = ModelCheckpoint(
         dirpath=checkpoint_path,
         filename="{epoch:02d}-"
@@ -70,7 +71,7 @@ def train(config: Config, stage_index: int):
         + "-{"
         + stage_trainer.monitor
         + ":.2f}",
-        save_top_k=1,
+        save_top_k=1 if stage_config.save else 0,
         save_last=False,
         monitor=stage_trainer.monitor,
         mode=stage_trainer.monitor_mode,

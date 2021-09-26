@@ -231,7 +231,9 @@ class GLUEDataset:
             "input_ids": input_ids.unsqueeze(0),
             "attention_mask": attention_mask.unsqueeze(0),
             "token_type_ids": token_type_ids.unsqueeze(0),
-            "label": t.tensor([label], dtype=t.long),
+            "label": t.tensor(
+                [label], dtype=t.long if self.task != "stsb" else t.float32
+            ),
             "idx": t.tensor([idx], dtype=t.long),
             "dataset_id": t.tensor([dataset_id], dtype=t.long),
         }
@@ -258,12 +260,12 @@ class GLUEDataset:
             mnli_m_idx = [
                 idx
                 for idx in range(len(labels))
-                if batch["dataset"][idx] == self.MNLI_MATCHED
+                if batch["dataset_id"][idx] == self.MNLI_MATCHED
             ]
             mnli_mm_idx = [
                 idx
                 for idx in range(len(labels))
-                if batch["dataset"][idx] == self.MNLI_MISMATCHED
+                if batch["dataset_id"][idx] == self.MNLI_MISMATCHED
             ]
             mnli_m_metric = self.metric.compute(
                 predictions=labels[mnli_m_idx], references=ref_labels[mnli_m_idx]
@@ -435,7 +437,9 @@ class GLUEDataset:
                         dtype=np.int32,
                     )
                     label_dataset = sub_group.create_dataset(
-                        name="label", shape=(limit_num,), dtype=np.int32
+                        name="label",
+                        shape=(limit_num,),
+                        dtype=np.int32 if self.task != "stsb" else np.float32,
                     )
                     idx_dataset = sub_group.create_dataset(
                         name="idx", shape=(limit_num,), dtype=np.int32
