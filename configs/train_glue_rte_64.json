@@ -5,7 +5,7 @@
             "base_configs": {},
             "base_type": "bert-large-uncased",
             "batch_size": 8,
-            "epochs": 10,
+            "epochs": 15,
             "extend_config": {
                 "modified_internal_layers": [-1]
             },
@@ -13,28 +13,28 @@
             "kb_encoder_path": "/data/workspace/kb-ae-bert/train_entity_and_relation_64/0/checkpoint/epoch=01-total_loss-total_loss=1.70.ckpt",
             "kb_encoder_context_length": 32,
             "kb_encoder_max_seq_length": 64,
-            "kb_process_gpus": [0, 1, 2, 3],
+            "kb_process_gpus": [0, 1],
             "kb_process_batch_size_per_gpu": 64,
             "load_worker_num": 4,
             "load_prefetch_per_worker": 16,
             "l2_regularization": 0,
-            "learning_rate": 2e-05,
-            "load": true,
+            "learning_rate": 3e-05,
+            "load": false,
             "max_train_samples": null,
             "max_validate_samples": null,
             "max_test_samples": null,
             "optimizer_class": "Adam",
-            "seed": 697474,
+            "seed": 23689171,
             "save": true,
-            "task": "sst2"
+            "task": "rte"
         }
     ],
-    "early_stopping_patience": 2,
+    "early_stopping_patience": 5,
     "gpus": [
-        0, 1, 2, 3
+        0, 1
     ],
     "pipeline": [
         "glue"
     ],
-    "working_directory": "/data/workspace/kb-ae-bert/train_glue_sst2_64_mlp_internal"
+    "working_directory": "/data/workspace/kb-ae-bert/train_glue_rte_64_mlp_internal"
 }

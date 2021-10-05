@@ -83,8 +83,10 @@ class GLUETrainConfig(BaseModel):
     seed: int = 0
     save: bool = True
     epochs: int = 3
+    train_steps: Optional[int] = None
     batch_size: int = 2
     accumulate_grad_batches: int = 32
+    storage_precision: int = 32
     max_train_samples: Optional[int] = None
     max_validate_samples: Optional[int] = None
     max_test_samples: Optional[int] = None

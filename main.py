@@ -17,11 +17,21 @@ if __name__ == "__main__":
 
     p_train = subparsers.add_parser("train", help="Start training.")
 
+    p_test = subparsers.add_parser("test", help="Start testing.")
+
     p_train.add_argument(
         "--config", type=str, required=True, help="Path of the config file.",
     )
 
     p_train.add_argument(
+        "--stage", type=int, default=None, help="Stage number to run.",
+    )
+
+    p_test.add_argument(
+        "--config", type=str, required=True, help="Path of the config file.",
+    )
+
+    p_test.add_argument(
         "--stage", type=int, default=None, help="Stage number to run.",
     )
 
@@ -46,7 +56,7 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    if args.command == "train":
+    if args.command == "train" or args.command == "test":
         ctx = get_context("spawn")
         config = load_config(args.config)
         assert len(config.pipeline) == len(
@@ -79,7 +89,7 @@ if __name__ == "__main__":
             assert (
                 0 <= args.stage < len(config.pipeline)
             ), f"Stage number {args.stage} out of range."
-            train(config, args.stage)
+            train(config, args.stage, only_test=args.command == "test")
 
     elif args.command == "generate":
         config = Config()

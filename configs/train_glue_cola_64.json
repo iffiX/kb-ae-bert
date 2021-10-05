@@ -5,11 +5,11 @@
             "base_configs": {},
             "base_type": "bert-large-uncased",
             "batch_size": 8,
-            "epochs": 20,
+            "epochs": 10,
             "extend_config": {
                 "modified_internal_layers": [-1]
             },
-            "extend_mode": "mlp",
+            "extend_mode": "mlp_internal",
             "kb_encoder_path": "/data/workspace/kb-ae-bert/train_entity_and_relation_64/0/checkpoint/epoch=01-total_loss-total_loss=1.70.ckpt",
             "kb_encoder_context_length": 32,
             "kb_encoder_max_seq_length": 64,
@@ -24,12 +24,12 @@
             "max_validate_samples": null,
             "max_test_samples": null,
             "optimizer_class": "Adam",
-            "seed": 5194742,
-            "save": false,
+            "seed": 697474,
+            "save": true,
             "task": "cola"
         }
     ],
-    "early_stopping_patience": 100,
+    "early_stopping_patience": 3,
     "gpus": [
         0, 1
     ],

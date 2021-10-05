@@ -5,9 +5,11 @@
             "base_configs": {},
             "base_type": "bert-large-uncased",
             "batch_size": 8,
-            "epochs": 3,
-            "extend_config": {},
-            "extend_mode": "mlp",
+            "epochs": 20,
+            "extend_config": {
+                "modified_internal_layers": [-1]
+            },
+            "extend_mode": "mlp_internal",
             "kb_encoder_path": "/data/workspace/kb-ae-bert/train_entity_and_relation_64/0/checkpoint/epoch=01-total_loss-total_loss=1.70.ckpt",
             "kb_encoder_context_length": 32,
             "kb_encoder_max_seq_length": 64,
@@ -15,19 +17,20 @@
             "kb_process_batch_size_per_gpu": 64,
             "load_worker_num": 4,
             "load_prefetch_per_worker": 16,
-
             "l2_regularization": 0,
             "learning_rate": 1e-05,
-            "load": false,
+            "load": true,
             "max_train_samples": null,
             "max_validate_samples": null,
             "max_test_samples": null,
             "optimizer_class": "Adam",
             "seed": 5194742,
-            "task": "qqp"
+            "save": true,
+            "task": "qqp",
+            "train_steps": 2000
         }
     ],
-    "early_stopping_patience": 100,
+    "early_stopping_patience": 10,
     "gpus": [
         0, 1, 2, 3
     ],

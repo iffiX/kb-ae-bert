@@ -6,7 +6,6 @@ from torch.utils.data import DataLoader
 from torch.distributed import all_gather_object, get_world_size, get_rank
 from transformers import AutoTokenizer, BatchEncoding
 from pytorch_lightning.utilities import rank_zero_only
-from .kb_trainer import KBEncoderTrainer
 from ..model.ext_vocab import ExtendVocabForSequenceClassification
 from ..dataset.base import collate_function_dict_to_batch_encoding
 from kb_ae_bert.dataset.glue import GLUEDataset
@@ -35,13 +34,12 @@ class GLUETrainer(pl.LightningModule):
         self.dataset = GLUEDataset(
             task=config.task,
             tokenizer=self.glue_tokenizer,
-            kb_model=KBEncoderTrainer.load_from_checkpoint(
-                config.kb_encoder_path, only_init_model=True
-            ).kb_model,
+            kb_encoder_path=config.kb_encoder_path,
             kb_context_length=config.kb_encoder_context_length,
             kb_max_seq_length=config.kb_encoder_max_seq_length,
             kb_process_gpus=config.kb_process_gpus,
             kb_process_batch_size_per_gpu=config.kb_process_batch_size_per_gpu,
+            storage_precision=config.storage_precision,
             max_seq_length=config.max_seq_length,
             max_train_samples=config.max_train_samples,
             max_validate_samples=config.max_validate_samples,
@@ -87,14 +85,18 @@ class GLUETrainer(pl.LightningModule):
     def val_dataloader(self):
         return DataLoader(
             dataset=self.dataset.validate_dataset,
-            batch_size=1,
+            num_workers=self.config.load_worker_num,
+            prefetch_factor=self.config.load_prefetch_per_worker,
+            batch_size=self.config.batch_size,
             collate_fn=collate_function_dict_to_batch_encoding,
         )
 
     def test_dataloader(self):
         return DataLoader(
             dataset=self.dataset.test_dataset,
-            batch_size=1,
+            num_workers=self.config.load_worker_num,
+            prefetch_factor=self.config.load_prefetch_per_worker,
+            batch_size=self.config.batch_size,
             collate_fn=collate_function_dict_to_batch_encoding,
         )
 
@@ -157,15 +159,7 @@ class GLUETrainer(pl.LightningModule):
             self.validate_on_every_process(outputs)
 
     def validate_on_every_process(self, outputs):
-        existed = {}
-        filtered = []
-        for o in outputs:
-            idx = int(o["batch"]["idx"])
-            if idx not in existed:
-                filtered.append(o)
-                existed[idx] = o
-        batch = collate_function_dict_to_batch_encoding([f["batch"] for f in filtered])
-        logits = t.cat([f["logits"] for f in filtered], dim=0)
+        batch, logits = self.collate_and_filter_outputs(outputs)
         metrics = self.dataset.validate(batch, logits)
         for key, value in metrics.items():
             self.log(key, value, prog_bar=True, sync_dist=True)
@@ -213,20 +207,7 @@ class GLUETrainer(pl.LightningModule):
 
     @rank_zero_only
     def test_on_main_process(self, outputs):
-        batch = collate_function_dict_to_batch_encoding([o["batch"] for o in outputs])
-        list_of_logits = [
-            (int(idx), o["logits"]) for idx, o in zip(batch["idx"], outputs)
-        ]
-        # filter duplicates brought by resetting dataset
-        existed = {}
-        filtered = []
-        for ll in list_of_logits:
-            if ll[0] not in existed:
-                filtered.append(ll)
-                existed[ll[0]] = True
-        list_of_logits = filtered
-        list_of_logits.sort(key=lambda l: l[0])
-        logits = t.cat([ll[1] for ll in list_of_logits], dim=0)
+        _, logits = self.collate_and_filter_outputs(outputs)
         assert logits.shape[0] == self.dataset.test_size, (
             f"Size not match, input is {logits.shape[0]}, "
             f"reference is {self.dataset.test_size}"
@@ -241,3 +222,32 @@ class GLUETrainer(pl.LightningModule):
             lr=self.config.learning_rate,
             weight_decay=self.config.l2_regularization,
         )
+
+    @staticmethod
+    def collate_and_filter_outputs(outputs):
+        batch = collate_function_dict_to_batch_encoding([o["batch"] for o in outputs])
+        logits = t.cat([o["logits"] for o in outputs], dim=0)
+        list_of_results = [
+            (int(idx), int(d_id), lab.view(1), log.view(1, -1))
+            for idx, d_id, lab, log in zip(
+                batch["idx"], batch["dataset_id"], batch["label"], logits
+            )
+        ]
+        # filter duplicates brought by resetting dataset
+        existed = {}
+        filtered = []
+        for lr in list_of_results:
+            if lr[0] not in existed:
+                filtered.append(lr)
+                existed[lr[0]] = True
+        list_of_results = filtered
+        list_of_results.sort(key=lambda lr: lr[0])
+        logits = t.cat([lr[3] for lr in list_of_results], dim=0)
+        batch = BatchEncoding(
+            {
+                "idx": t.tensor([lr[0] for lr in list_of_results]),
+                "dataset_id": t.tensor([lr[1] for lr in list_of_results]),
+                "label": t.cat([lr[2] for lr in list_of_results], dim=0).flatten(),
+            }
+        )
+        return batch, logits

@@ -20,18 +20,28 @@ class SharedVariable:
         return self.val
 
 
-class HiddenPlugin(nn.Module):
-    def __init__(self, encoder_layer, hidden_size, mlp_input: SharedVariable):
-        super(HiddenPlugin, self).__init__()
+class HiddenExtender(nn.Module):
+    def __init__(
+        self,
+        encoder_layer,
+        hidden_size,
+        mlp_input: SharedVariable,
+        detch_input_hidden: bool = False,
+    ):
+        super(HiddenExtender, self).__init__()
         self.encoder_layer = encoder_layer
         self.mlp = nn.Linear(hidden_size, hidden_size, bias=False)
         self.mlp_input = mlp_input
+        self.detch_input_hidden = detch_input_hidden
 
     def forward(self, hidden_states, *args, **kwargs):
         mix = self.mlp(self.mlp_input.get())
         assert list(hidden_states.shape) == list(mix.shape)
         l2_normalizer = t.sqrt(t.sum(mix ** 2) / t.sum(hidden_states ** 2)).detach()
-        new_hidden_states = mix / l2_normalizer + hidden_states
+        if self.detch_input_hidden:
+            new_hidden_states = mix / l2_normalizer + hidden_states.detach()
+        else:
+            new_hidden_states = mix / l2_normalizer + hidden_states
         return self.encoder_layer(new_hidden_states, *args, **kwargs)
 
 
@@ -74,10 +84,7 @@ class ExtendVocab(nn.Module):
         elif extend_mode in ("ratio_mix", "replace", "replace_partial", "none"):
             pass
         elif extend_mode == "mlp":
-            # self.mlp = nn.Linear(
-            #     self.base.config.hidden_size * 2, self.base.config.hidden_size
-            # )
-            # better if no bias
+            # unstable
             self.mlp = nn.Linear(
                 self.base.config.hidden_size, self.base.config.hidden_size, bias=False
             )
@@ -90,9 +97,18 @@ class ExtendVocab(nn.Module):
                 internal_layer_indexes[m]
                 for m in extend_config["modified_internal_layers"]
             ]
+            if extend_config.get("freeze_lower", False):
+                freeze_start = min(modified_internal_layers)
+            else:
+                freeze_start = -1
             new_encoder_layer = nn.ModuleList(
                 [
-                    HiddenPlugin(layer, self.base.config.hidden_size, self.mlp_input)
+                    HiddenExtender(
+                        layer,
+                        self.base.config.hidden_size,
+                        self.mlp_input,
+                        detch_input_hidden=idx == freeze_start,
+                    )
                     if idx in modified_internal_layers
                     else layer
                     for idx, layer in enumerate(
@@ -105,25 +121,27 @@ class ExtendVocab(nn.Module):
                 f"Modified internal layers: {modified_internal_layers}, "
                 f"from layers: {internal_layer_indexes}"
             )
+            if freeze_start != -1:
+                logging.info(f"Freeze layers below layer {freeze_start}")
         else:
             raise ValueError(f"Unknown extend_mode {extend_mode}")
 
-    # def parameters(self, recurse: bool = True):
-    #     if self.extend_config.get("freeze_base", False):
-    #         parameters = [
-    #             param
-    #             for name, param in self.base.named_parameters()
-    #             if self.model_name not in name
-    #         ]
-    #     else:
-    #         parameters = list(self.base.parameters(recurse=recurse))
-    #
-    #     if self.extend_mode == "ratio_mix_learnable":
-    #         return parameters + [self.mix_weight]
-    #     elif self.extend_mode == "mlp":
-    #         return parameters + list(self.mlp.parameters())
-    #     else:
-    #         return parameters
+    def parameters(self, recurse: bool = True):
+        if self.extend_config.get("freeze_base", False):
+            parameters = [
+                param
+                for name, param in self.base.named_parameters()
+                if self.model_name not in name
+            ]
+        else:
+            parameters = list(self.base.parameters(recurse=recurse))
+
+        if self.extend_mode == "ratio_mix_learnable":
+            return parameters + [self.mix_weight]
+        elif self.extend_mode == "mlp":
+            return parameters + list(self.mlp.parameters())
+        else:
+            return parameters
 
 
 class ExtendVocabForQA(ExtendVocab):
@@ -210,11 +228,12 @@ class ExtendVocabForQA(ExtendVocab):
                 extend_tokens.unsqueeze(-1) == 1, new_embeds, token_embeds
             )
         elif self.extend_mode == "mlp":
-            # both works
-            # new_embeds = self.mlp(t.cat((token_embeds, extend_embeds), dim=2))
+            # not working
             new_embeds = self.mlp(extend_embeds)
-
-            l2_normalizer = t.sqrt(t.sum(new_embeds ** 2) / t.sum(token_embeds ** 2))
+            assert list(new_embeds.shape) == list(token_embeds.shape)
+            l2_normalizer = t.sqrt(
+                t.sum(new_embeds ** 2) / t.sum(token_embeds ** 2)
+            ).detach()
             new_embeds = new_embeds / l2_normalizer + token_embeds
             token_embeds = t.where(
                 extend_tokens.unsqueeze(-1) == 1, new_embeds, token_embeds
@@ -224,13 +243,22 @@ class ExtendVocabForQA(ExtendVocab):
         elif self.extend_mode == "none":
             pass
 
-        out = self.base(
-            inputs_embeds=token_embeds,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-            start_positions=start_positions,
-            end_positions=end_positions,
-        )
+        if self.extend_mode != "mlp_internal":
+            out = self.base(
+                inputs_embeds=token_embeds,
+                attention_mask=attention_mask,
+                token_type_ids=token_type_ids,
+                start_positions=start_positions,
+                end_positions=end_positions,
+            )
+        else:
+            out = self.base(
+                input_ids=token_ids,
+                attention_mask=attention_mask,
+                token_type_ids=token_type_ids,
+                start_positions=start_positions,
+                end_positions=end_positions,
+            )
         return (
             None if start_positions is None or end_positions is None else out.loss,
             out.start_logits,
@@ -321,8 +349,6 @@ class ExtendVocabForSequenceClassification(ExtendVocab):
             )
         elif self.extend_mode == "mlp":
             # not working
-
-            # new_embeds = self.mlp(t.cat((token_embeds, extend_embeds), dim=2))
             new_embeds = self.mlp(extend_embeds)
             assert list(new_embeds.shape) == list(token_embeds.shape)
             l2_normalizer = t.sqrt(

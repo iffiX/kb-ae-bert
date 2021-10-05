@@ -11,7 +11,7 @@ from datasets import (
     DownloadConfig,
 )
 from transformers import PreTrainedTokenizerBase, BatchEncoding
-from kb_ae_bert.model.kb_ae import KBMaskedLMEncoder
+from kb_ae_bert.trainer.kb_trainer import KBEncoderTrainer
 from kb_ae_bert.utils.file import open_file_with_create_directories
 from kb_ae_bert.utils.settings import (
     dataset_cache_dir,
@@ -76,11 +76,12 @@ class GLUEDataset:
         self,
         task: str,
         tokenizer: PreTrainedTokenizerBase,
-        kb_model: KBMaskedLMEncoder,
+        kb_encoder_path: str,
         kb_context_length: int,
         kb_max_seq_length: int,
         kb_process_gpus: List[int],
         kb_process_batch_size_per_gpu: int = 32,
+        storage_precision: int = 32,
         max_seq_length: int = 128,
         max_train_samples: int = None,
         max_validate_samples: int = None,
@@ -102,6 +103,7 @@ class GLUEDataset:
         self.kb_context_length = kb_context_length
         self.kb_max_seq_length = kb_max_seq_length
 
+        self.storage_precision = np.float16 if storage_precision == 16 else np.float32
         self.max_seq_length = max_seq_length
         self.max_train_samples = max_train_samples
         self.max_validate_samples = max_validate_samples
@@ -109,11 +111,11 @@ class GLUEDataset:
         self.datasets = [
             load_dataset(
                 path="glue",
-                name=task,
+                name=dataset,
                 cache_dir=huggingface_path,
                 download_config=DownloadConfig(proxies=proxies),
             )
-            for task in self.task_to_datasets[task]
+            for dataset in self.task_to_datasets[task]
         ]
 
         self.metric = load_metric(
@@ -142,13 +144,15 @@ class GLUEDataset:
                 os.remove(data_path)
                 logging.info(f"Data for GLUE[{self.task}] not found, generating.")
                 self.preprocess(
-                    kb_model, kb_process_gpus, kb_process_batch_size_per_gpu
+                    kb_encoder_path, kb_process_gpus, kb_process_batch_size_per_gpu
                 )
             else:
                 logging.info(f"Found data for GLUE[{self.task}], skipping generation.")
         else:
             logging.info(f"Data for GLUE[{self.task}] not found, generating.")
-            self.preprocess(kb_model, kb_process_gpus, kb_process_batch_size_per_gpu)
+            self.preprocess(
+                kb_encoder_path, kb_process_gpus, kb_process_batch_size_per_gpu
+            )
         self.open_file()
 
     @property
@@ -250,11 +254,13 @@ class GLUEDataset:
 
     def validate(self, batch: BatchEncoding, logits: t.Tensor):
         logits = logits.cpu().numpy()
-        # print(logits)
         labels = np.squeeze(logits) if self.is_regression else np.argmax(logits, axis=1)
         ref_labels = batch["label"].cpu().numpy()
 
         if self.task != "mnli":
+            print(f"labels: {labels.tolist()}")
+            print(f"ref_labels: {ref_labels.tolist()}")
+            print(f"idx: {batch['idx'].cpu().tolist()}")
             return self.metric.compute(predictions=labels, references=ref_labels)
         else:
             mnli_m_idx = [
@@ -283,6 +289,7 @@ class GLUEDataset:
     def generate_test_results(self, logits: t.Tensor, directory: str):
         logits = logits.cpu().numpy()
         labels = np.squeeze(logits) if self.is_regression else np.argmax(logits, axis=1)
+        print(f"labels: {labels.tolist()}")
         if len(labels) != self.test_size:
             raise ValueError(
                 f"Label size {len(labels)} does not match test size {self.test_size}"
@@ -290,12 +297,13 @@ class GLUEDataset:
         # File format is specified by https://gluebenchmark.com/faq FAQ #1
         logging.info("Saving test results.")
         if self.is_regression:
+            # STS-B
             with open_file_with_create_directories(
                 os.path.join(directory, self.task_to_reports[self.task][0]), "w"
             ) as file:
                 file.write("index\tprediction\n")
                 for index, item in enumerate(labels):
-                    file.write(f"{index}\t{item:3.3f}\n")
+                    file.write(f"{index}\t{max(min(item, 5), 0):3.3f}\n")
         elif self.task != "mnli":
             label_list = self.datasets[0]["test"].features["label"].names
             with open_file_with_create_directories(
@@ -377,9 +385,18 @@ class GLUEDataset:
                     file.write(f"{index}\t{item}\n")
         logging.info("Saving finished.")
 
-    def preprocess(self, kb_model, kb_process_gpus, kb_process_batch_size_per_gpu):
+    def preprocess(
+        self, kb_encoder_path, kb_process_gpus, kb_process_batch_size_per_gpu
+    ):
+        kb_model = KBEncoderTrainer.load_from_checkpoint(
+            kb_encoder_path, only_init_model=True
+        ).kb_model
         data_path = os.path.join(preprocess_cache_dir, "glue_data", f"{self.task}.hdf5")
         os.makedirs(os.path.dirname(data_path), exist_ok=True)
+        if self.storage_precision == np.float16:
+            logging.info("Using half precision to store.")
+        else:
+            logging.info("Using full precision to store.")
         with h5py.File(data_path, "w", rdcc_nbytes=1024 ** 3) as file:
             hidden_size = kb_model.hidden_size
             kb_model = t.nn.DataParallel(
@@ -418,7 +435,7 @@ class GLUEDataset:
                     kb_embeds_dataset = sub_group.create_dataset(
                         name="kb_embeds",
                         shape=(limit_num, self.max_seq_length, hidden_size),
-                        dtype=np.float32,
+                        dtype=self.storage_precision,
                         chunks=(16, self.max_seq_length, hidden_size),
                     )
                     input_ids_dataset = sub_group.create_dataset(
@@ -522,6 +539,9 @@ class GLUEDataset:
                             progress_bar.update(processed_num)
 
     def open_file(self):
-        data_path = os.path.join(preprocess_cache_dir, "glue_data", f"{self.task}.hdf5")
-        os.makedirs(os.path.dirname(data_path), exist_ok=True)
-        self.file = h5py.File(data_path, "r", rdcc_nbytes=4 * 1024 ** 3)
+        if self.file is None:
+            data_path = os.path.join(
+                preprocess_cache_dir, "glue_data", f"{self.task}.hdf5"
+            )
+            os.makedirs(os.path.dirname(data_path), exist_ok=True)
+            self.file = h5py.File(data_path, "r", rdcc_nbytes=256 * 1024 ** 2)
